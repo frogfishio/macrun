@@ -15,7 +15,21 @@ bump:
 	fi; \
 	next="$$(printf '%s\n' "$$current" | awk -F. 'BEGIN { OFS = "." } { if (NF == 1) { print $$1 + 1 } else { $$NF = $$NF + 1; print $$0 } }')"; \
 	printf '%s\n' "$$next" > VERSION; \
-	echo "VERSION=$$next"
+	awk -v version="$$next" ' \
+		BEGIN { updated = 0 } \
+		/^version = "/ && !updated { print "version = \"" version "\""; updated = 1; next } \
+		{ print } \
+		END { if (!updated) exit 2 } \
+	' Cargo.toml > Cargo.toml.tmp; \
+	status="$$?"; \
+	if [ "$$status" -ne 0 ]; then \
+		rm -f Cargo.toml.tmp; \
+		echo "failed to update Cargo.toml version" >&2; \
+		exit "$$status"; \
+	fi; \
+	mv Cargo.toml.tmp Cargo.toml; \
+	echo "VERSION=$$next"; \
+	echo "Cargo.toml version=$$next"
 
 clean:
 	rm -rf target
