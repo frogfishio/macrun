@@ -34,6 +34,12 @@ Not a fit:
 
 ## 3. Installation
 
+Install from crates.io:
+
+```bash
+cargo install macrun
+```
+
 Install from this repository:
 
 ```bash
@@ -44,12 +50,6 @@ Or run during development without installing:
 
 ```bash
 cargo run -- doctor
-```
-
-If published separately to crates.io, installation would be:
-
-```bash
-cargo install macrun
 ```
 
 ## 4. Command Summary

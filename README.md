@@ -38,6 +38,12 @@ If a process receives a secret, that process can still leak it. macrun reduces e
 
 ## Install
 
+From crates.io:
+
+```bash
+cargo install macrun
+```
+
 From this repository:
 
 ```bash
@@ -50,10 +56,10 @@ During development you can also run it directly:
 cargo run -- doctor
 ```
 
-If published to crates.io, the install command would be:
+To install the exact lockfile-resolved dependency set from a published release:
 
 ```bash
-cargo install macrun
+cargo install --locked macrun
 ```
 
 ## Quick Start
@@ -243,6 +249,33 @@ It does not protect against:
 - [USER_GUIDE.md](USER_GUIDE.md) for full usage and operational guidance
 - [TODO.md](TODO.md) for implementation notes and future work
 
+## Release Workflow
+
+Typical release flow:
+
+```bash
+make bump
+make dist
+cargo publish
+```
+
+What those steps do:
+
+- `make bump` increments [VERSION](VERSION)
+- `make dist` increments [BUILD](BUILD), builds a release binary, and stages release artifacts in `dist/`
+- `cargo publish` publishes the crate so users can install it with `cargo install macrun`
+
+The staged distribution currently includes:
+
+- `dist/bin/macrun`
+- `dist/USER_GUIDE.md`
+- `dist/README.md`
+- `dist/LICENSE`
+
+`BUILD` is intentionally included in the published crate source because the binary reads both [VERSION](VERSION) and [BUILD](BUILD) at compile time to produce the custom `--version` output.
+
 ## License
 
 GPL-3.0-or-later
+
+Copyright (c) Alexander R. Croft
