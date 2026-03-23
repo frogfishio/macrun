@@ -52,6 +52,14 @@ impl IndexFile {
             .cloned()
             .collect()
     }
+
+    pub fn entries_owned_for_project(&self, project: &str) -> Vec<StoredSecretMeta> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.project == project)
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -13,7 +13,10 @@ use directories::ProjectDirs;
 use crate::cli::{Cli, Commands, EnvFormat, KvVersionArg, VaultCommands};
 use crate::config::{find_local_config, LocalConfig, ResolvedScope, CONFIG_FILE_NAME};
 use crate::index::{IndexFile, StoredSecretMeta};
-use crate::keychain::{delete_secret, read_secret, store_secret};
+use crate::keychain::{
+    delete_legacy_secret, delete_secret, read_legacy_secret, read_project_bundle, read_scope_secrets,
+    read_secret, store_secret, write_project_bundle, write_scope_secrets,
+};
 use crate::util::{parse_env_file, parse_env_mapping, parse_pair, shell_quote, validate_env_name, EnvMapping};
 use crate::vault::{parse_key_version, KvVersion, VaultClient};
 
@@ -308,11 +311,12 @@ impl App {
         json: bool,
     ) -> Result<ExitCode> {
         let mut index = self.load_index()?;
+        let mut scope_secrets = read_scope_secrets(&scope.project, &scope.env)?;
         let mut written = Vec::new();
 
         for pair in pairs {
             let (name, value) = parse_pair(&pair)?;
-            store_secret(&scope.project, &scope.env, &name, &value)?;
+            scope_secrets.insert(name.clone(), value);
             index.upsert(StoredSecretMeta::new(
                 scope.project.clone(),
                 scope.env.clone(),
@@ -323,6 +327,7 @@ impl App {
             written.push(name);
         }
 
+        write_scope_secrets(&scope.project, &scope.env, &scope_secrets)?;
         self.save_index(&index)?;
 
         if json {
@@ -379,6 +384,7 @@ impl App {
             .with_context(|| format!("failed to read {}", file.display()))?;
         let parsed = parse_env_file(&contents)?;
         let mut index = self.load_index()?;
+        let mut scope_secrets = read_scope_secrets(&scope.project, &scope.env)?;
         let mut imported = Vec::new();
         let mut skipped = Vec::new();
 
@@ -388,7 +394,7 @@ impl App {
                 continue;
             }
 
-            store_secret(&scope.project, &scope.env, &name, &value)?;
+            scope_secrets.insert(name.clone(), value);
             index.upsert(StoredSecretMeta::new(
                 scope.project.clone(),
                 scope.env.clone(),
@@ -399,6 +405,7 @@ impl App {
             imported.push(name);
         }
 
+        write_scope_secrets(&scope.project, &scope.env, &scope_secrets)?;
         self.save_index(&index)?;
 
         if json {
@@ -545,12 +552,15 @@ impl App {
         json: bool,
     ) -> Result<ExitCode> {
         let mut index = self.load_index()?;
+        let mut scope_secrets = read_scope_secrets(&scope.project, &scope.env)?;
         let mut removed = Vec::new();
         for name in names {
-            delete_secret(&scope.project, &scope.env, name)?;
+            scope_secrets.remove(name);
+            delete_legacy_secret(&scope.project, &scope.env, name)?;
             index.remove(&scope.project, &scope.env, name);
             removed.push(name.clone());
         }
+        write_scope_secrets(&scope.project, &scope.env, &scope_secrets)?;
         self.save_index(&index)?;
 
         if json {
@@ -581,9 +591,10 @@ impl App {
             .collect();
 
         for key in &keys {
-            delete_secret(&scope.project, &scope.env, key)?;
+            delete_legacy_secret(&scope.project, &scope.env, key)?;
             index.remove(&scope.project, &scope.env, key);
         }
+        write_scope_secrets(&scope.project, &scope.env, &BTreeMap::new())?;
         self.save_index(&index)?;
 
         if json {
@@ -653,14 +664,7 @@ impl App {
         &self,
         scope: &ResolvedScope,
     ) -> Result<BTreeMap<String, String>> {
-        let index = self.load_index()?;
-        let entries = index.entries_for_scope(&scope.project, &scope.env);
-        let mut env_map = BTreeMap::new();
-        for entry in entries {
-            let value = read_secret(&scope.project, &scope.env, &entry.key)?;
-            env_map.insert(entry.key.clone(), value);
-        }
-        Ok(env_map)
+        read_scope_secrets(&scope.project, &scope.env)
     }
 
     fn inject_vault_ciphertexts(
@@ -724,6 +728,7 @@ impl App {
     ) -> Result<ResolvedScope> {
         let scope = self.resolve_scope(project, env)?;
         self.migrate_legacy_default_scope(&scope)?;
+        self.migrate_project_bundle(&scope.project)?;
         Ok(scope)
     }
 
@@ -755,6 +760,47 @@ impl App {
         }
 
         self.save_index(&index)
+    }
+
+    fn migrate_project_bundle(&self, project: &str) -> Result<()> {
+        let index = self.load_index().unwrap_or_default();
+        let project_entries = index.entries_owned_for_project(project);
+        if project_entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut bundle = read_project_bundle(project)?;
+        let mut changed = false;
+
+        for entry in project_entries {
+            if bundle
+                .envs
+                .get(&entry.env)
+                .and_then(|scope| scope.get(&entry.key))
+                .is_some()
+            {
+                continue;
+            }
+
+            match read_legacy_secret(project, &entry.env, &entry.key) {
+                Ok(value) => {
+                    bundle
+                        .envs
+                        .entry(entry.env.clone())
+                        .or_default()
+                        .insert(entry.key.clone(), value);
+                    delete_legacy_secret(project, &entry.env, &entry.key)?;
+                    changed = true;
+                }
+                Err(_) => continue,
+            }
+        }
+
+        if changed {
+            write_project_bundle(project, &bundle)?;
+        }
+
+        Ok(())
     }
 
     fn display_project<'a>(&self, scope: &'a ResolvedScope) -> &'a str {

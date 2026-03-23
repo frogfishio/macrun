@@ -352,10 +352,12 @@ If you are unsure why a command cannot resolve a project or env, start with `doc
 
 ## 16. Storage Details
 
-The current implementation stores secret values in macOS Keychain using:
+The current implementation stores secret values in macOS Keychain as one bundled item per project:
 
-- service: `macrun/<project>/<env>`
-- account: env var name
+- service: `macrun/<project>`
+- account: `__project_bundle__`
+
+Inside that bundle, secrets remain separated by env.
 
 macrun also stores non-secret metadata in its local application config directory. That metadata powers commands such as `list`, `unset`, `purge`, and scoped selection.
 

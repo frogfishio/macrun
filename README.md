@@ -240,10 +240,12 @@ So commands like `macrun set URL=https://somewhere` work immediately.
 
 Secret values live in macOS Keychain.
 
-The current Keychain layout uses:
+The current Keychain layout uses one bundled item per project:
 
-- service: `macrun/<project>/<env>`
-- account: env var name
+- service: `macrun/<project>`
+- account: `__project_bundle__`
+
+Inside that bundle, secrets remain grouped by env.
 
 Non-secret metadata is stored in the app config directory so macrun can efficiently list entries and track source and update time.
 
