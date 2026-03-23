@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -10,7 +13,6 @@ use directories::ProjectDirs;
 use crate::cli::{Cli, Commands, EnvFormat, VaultCommands};
 use crate::config::{find_local_config, LocalConfig, ResolvedScope, CONFIG_FILE_NAME};
 use crate::index::{IndexFile, StoredSecretMeta};
-use crate::k2mx::{CreateProviderSecretRequest, K2MxClient};
 use crate::keychain::{delete_secret, read_secret, store_secret};
 use crate::util::{parse_env_file, parse_pair, select_entries, shell_quote, validate_env_name};
 use crate::vault::{parse_key_version, VaultClient};
@@ -37,60 +39,60 @@ impl App {
 
     pub fn execute(&self, cli: Cli) -> Result<ExitCode> {
         match cli.command {
-            Commands::Init {
+            Some(Commands::Init {
                 project,
                 profile,
                 force,
-            } => self.init(project.or(cli.project), profile.or(cli.profile), force, cli.json),
-            Commands::Set { pairs, source, note } => {
+            }) => self.init(project.or(cli.project), profile.or(cli.profile), force, cli.json),
+            Some(Commands::Set { pairs, source, note }) => {
                 let scope = self.resolve_scope(cli.project, cli.profile)?;
                 self.set_pairs(&scope, pairs, &source, note, cli.json)
             }
-            Commands::Get { name } => {
+            Some(Commands::Get { name }) => {
                 let scope = self.resolve_scope(cli.project, cli.profile)?;
                 self.get_secret(&scope, &name, cli.json)
             }
-            Commands::Import {
+            Some(Commands::Import {
                 file,
                 replace,
                 prefixes,
                 source,
-            } => {
+            }) => {
                 let scope = self.resolve_scope(cli.project, cli.profile)?;
                 self.import_file(&scope, &file, replace, &prefixes, &source, cli.json)
             }
-            Commands::List {
+            Some(Commands::List {
                 show_metadata,
                 prefixes,
-            } => {
+            }) => {
                 let scope = self.resolve_scope(cli.project, cli.profile)?;
                 self.list_entries(&scope, show_metadata, &prefixes, cli.json)
             }
-            Commands::Exec {
+            Some(Commands::Exec {
                 only,
                 prefixes,
                 command,
-            } => {
+            }) => {
                 let scope = self.resolve_scope(cli.project, cli.profile)?;
                 self.exec_command(&scope, &only, &prefixes, &command)
             }
-            Commands::Env {
+            Some(Commands::Env {
                 format,
                 only,
                 prefixes,
-            } => {
+            }) => {
                 let scope = self.resolve_scope(cli.project, cli.profile)?;
                 self.print_env(&scope, &format, &only, &prefixes)
             }
-            Commands::Unset { names } => {
+            Some(Commands::Unset { names }) => {
                 let scope = self.resolve_scope(cli.project, cli.profile)?;
                 self.unset_names(&scope, &names, cli.json)
             }
-            Commands::Purge { yes } => {
+            Some(Commands::Purge { yes }) => {
                 let scope = self.resolve_scope(cli.project, cli.profile)?;
                 self.purge_scope(&scope, yes, cli.json)
             }
-            Commands::Vault { command } => {
+            Some(Commands::Vault { command }) => {
                 let scope = self.resolve_scope(cli.project, cli.profile)?;
                 match command {
                     VaultCommands::Push {
@@ -98,17 +100,6 @@ impl App {
                         vault_addr,
                         transit_path,
                         vault_key,
-                        provider,
-                        name,
-                        k2mx_base_url,
-                        k2mx_bootstrap_token,
-                        provider_id,
-                        version,
-                        tenant_id,
-                        client_id,
-                        active_from,
-                        retired_at,
-                        dry_run,
                         verify_decrypt,
                     } => self.vault_push(
                         &scope,
@@ -116,23 +107,13 @@ impl App {
                         &vault_addr,
                         &transit_path,
                         &vault_key,
-                        &provider,
-                        &name,
-                        k2mx_base_url.as_deref(),
-                        k2mx_bootstrap_token.as_deref(),
-                        provider_id.as_deref(),
-                        version.as_deref(),
-                        tenant_id.as_deref(),
-                        client_id.as_deref(),
-                        active_from,
-                        retired_at,
-                        dry_run,
                         verify_decrypt,
                         cli.json,
                     ),
                 }
             }
-            Commands::Doctor => self.doctor(cli.project, cli.profile, cli.json),
+            Some(Commands::Doctor) => self.doctor(cli.project, cli.profile, cli.json),
+            None => bail!("no command provided"),
         }
     }
 
@@ -143,17 +124,6 @@ impl App {
         vault_addr: &str,
         transit_path: &str,
         vault_key: &str,
-        provider: &str,
-        name: &str,
-        k2mx_base_url: Option<&str>,
-        k2mx_bootstrap_token: Option<&str>,
-        provider_id: Option<&str>,
-        version: Option<&str>,
-        tenant_id: Option<&str>,
-        client_id: Option<&str>,
-        active_from: Option<String>,
-        retired_at: Option<String>,
-        dry_run: bool,
         verify_decrypt: bool,
         json: bool,
     ) -> Result<ExitCode> {
@@ -169,27 +139,6 @@ impl App {
             false
         };
 
-        let mut persisted_record_id = None;
-        let mut mode = "dry-run";
-
-        if !dry_run {
-            let request = CreateProviderSecretRequest {
-                provider_id: required_flag("--provider-id", provider_id)?,
-                version: required_flag("--version", version)?,
-                tenant_id: required_flag("--tenant-id", tenant_id)?,
-                client_id: required_flag("--client-id", client_id)?,
-                client_secret_wrapped: encrypted.ciphertext.clone(),
-                active_from,
-                retired_at,
-            };
-            let k2mx_base_url = required_flag("--k2mx-base-url", k2mx_base_url)?;
-            let bootstrap_token = resolve_k2mx_bootstrap_token(k2mx_bootstrap_token)?;
-            let client = K2MxClient::new(&k2mx_base_url, &bootstrap_token)?;
-            let created = client.create_provider_secret(&request)?;
-            persisted_record_id = Some(created.id);
-            mode = "persisted";
-        }
-
         if json {
             println!(
                 "{}",
@@ -197,26 +146,20 @@ impl App {
                     "project": scope.project,
                     "profile": scope.profile,
                     "env_key": env_key,
-                    "provider": provider,
-                    "name": name,
                     "vault_addr": vault_addr,
                     "transit_path": transit_path,
                     "vault_key": vault_key,
                     "ciphertext_length": encrypted.ciphertext.len(),
                     "key_version": key_version,
                     "verified_decrypt": decrypt_verified,
-                    "mode": mode,
-                    "k2mx_record_id": persisted_record_id,
-                    "runtime_compatible": true,
+                    "mode": "encrypted",
                 }))?
             );
         } else {
-            println!("prepared Vault transit ciphertext ({mode})");
+            println!("prepared Vault transit ciphertext");
             println!("project: {}", scope.project);
             println!("profile: {}", scope.profile);
             println!("env key: {env_key}");
-            println!("provider: {provider}");
-            println!("name: {name}");
             println!("vault addr: {vault_addr}");
             println!("transit path: {transit_path}");
             println!("vault key: {vault_key}");
@@ -228,9 +171,6 @@ impl App {
                 "verified decrypt: {}",
                 if decrypt_verified { "yes" } else { "no" }
             );
-            if let Some(record_id) = persisted_record_id {
-                println!("k2mx record id: {record_id}");
-            }
         }
 
         Ok(ExitCode::SUCCESS)
@@ -679,30 +619,4 @@ impl App {
             .with_context(|| format!("failed to move {} into place", self.index_path.display()))?;
         Ok(())
     }
-}
-
-fn required_flag(name: &str, value: Option<&str>) -> Result<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("{name} is required when persisting to k2mx"))
-}
-
-fn resolve_k2mx_bootstrap_token(explicit: Option<&str>) -> Result<String> {
-    explicit
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            env::var("K2MX_BOOTSTRAP_TOKEN")
-                .ok()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "K2MX bootstrap token is required when persisting; pass --k2mx-bootstrap-token or set K2MX_BOOTSTRAP_TOKEN"
-            )
-        })
 }

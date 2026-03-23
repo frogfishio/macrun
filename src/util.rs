@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use std::collections::BTreeSet;
 
 use anyhow::{anyhow, bail, Result};
@@ -111,8 +114,8 @@ mod tests {
 
     #[test]
     fn parse_pair_accepts_basic_assignment() {
-        let (name, value) = parse_pair("K2MX_API_KEY=secret").unwrap();
-        assert_eq!(name, "K2MX_API_KEY");
+        let (name, value) = parse_pair("APP_API_KEY=secret").unwrap();
+        assert_eq!(name, "APP_API_KEY");
         assert_eq!(value, "secret");
     }
 
@@ -131,22 +134,22 @@ mod tests {
     fn select_entries_respects_only_and_prefix() {
         let entries = vec![
             StoredSecretMeta::new(
-                "frogfish-k2".into(),
+                "my-app".into(),
                 "dev".into(),
                 "RBAC_JWT_SECRET".into(),
                 "manual".into(),
                 None,
             ),
             StoredSecretMeta::new(
-                "frogfish-k2".into(),
+                "my-app".into(),
                 "dev".into(),
-                "K2MX_K2DB_API_KEY".into(),
+                "APP_API_KEY".into(),
                 "manual".into(),
                 None,
             ),
         ];
         let refs = entries.iter().collect::<Vec<_>>();
-        let selected = select_entries(refs, &["RBAC_JWT_SECRET".into()], &["K2MX_".into()]).unwrap();
+        let selected = select_entries(refs, &["RBAC_JWT_SECRET".into()], &["APP_".into()]).unwrap();
         assert_eq!(selected.len(), 2);
     }
 

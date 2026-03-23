@@ -210,11 +210,8 @@ macrun includes an optional Vault transit workflow.
 1. read a secret from Keychain
 2. encrypt it using Vault transit
 3. optionally verify decrypt without printing plaintext
-4. optionally persist the wrapped value to a downstream admin API
 
-The currently implemented persistence target is a `k2mx` admin API. That integration is specific, while the local Keychain workflow remains general-purpose.
-
-Dry-run example:
+Example:
 
 ```bash
 export VAULT_TOKEN=...
@@ -222,9 +219,6 @@ export VAULT_TOKEN=...
 macrun vault push APP_CLIENT_SECRET \
   --vault-addr http://127.0.0.1:8200 \
   --vault-key app-secrets \
-  --provider example-provider \
-  --name primary \
-  --dry-run \
   --verify-decrypt
 ```
 

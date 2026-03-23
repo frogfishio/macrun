@@ -370,13 +370,10 @@ That workflow:
 1. reads a plaintext secret from Keychain
 2. encrypts it with Vault transit
 3. can verify decrypt without printing plaintext
-4. can optionally persist the wrapped ciphertext to a downstream admin API
-
-The currently implemented persistence target is a `k2mx` admin API. That part is specific to the present codebase; the local secret workflow remains generally useful even if you never use `vault push`.
 
 Vault authentication currently uses `VAULT_TOKEN` from the environment.
 
-Dry-run example:
+Example:
 
 ```bash
 export VAULT_TOKEN=...
@@ -385,33 +382,8 @@ macrun vault push APP_CLIENT_SECRET \
   --vault-addr http://127.0.0.1:8200 \
   --transit-path transit \
   --vault-key app-secrets \
-  --provider example-provider \
-  --name primary \
-  --dry-run \
   --verify-decrypt
 ```
-
-With downstream persistence:
-
-```bash
-export VAULT_TOKEN=...
-export K2MX_BOOTSTRAP_TOKEN=...
-
-macrun vault push APP_CLIENT_SECRET \
-  --vault-addr http://127.0.0.1:8200 \
-  --transit-path transit \
-  --vault-key app-secrets \
-  --provider example-provider \
-  --name primary \
-  --k2mx-base-url http://127.0.0.1:3002 \
-  --provider-id provider-123 \
-  --version v1 \
-  --tenant-id tenant-123 \
-  --client-id client-123 \
-  --verify-decrypt
-```
-
-When persistence is enabled, `--provider-id`, `--version`, `--tenant-id`, `--client-id`, and `--k2mx-base-url` are required. The bootstrap token can be supplied with `--k2mx-bootstrap-token` or `K2MX_BOOTSTRAP_TOKEN`.
 
 ## 19. Vault Over an SSH Tunnel
 
@@ -433,9 +405,6 @@ export VAULT_TOKEN=...
 macrun vault push APP_CLIENT_SECRET \
   --vault-addr http://127.0.0.1:18200 \
   --vault-key app-secrets \
-  --provider example-provider \
-  --name primary \
-  --dry-run
 ```
 
 If the remote Vault endpoint expects HTTPS with a certificate valid only for its original hostname, forwarding to `127.0.0.1` may cause hostname validation failures. That is a transport configuration issue rather than a macrun-specific behavior.
@@ -455,7 +424,6 @@ Patterns to avoid:
 - exporting your entire secret set into a long-lived shell session
 - keeping large plaintext `.env` files around after import
 - sharing one profile across unrelated environments
-- assuming `vault push` is generic downstream persistence when the current implementation targets `k2mx`
 
 ## 21. Troubleshooting
 

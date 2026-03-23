@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
