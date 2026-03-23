@@ -359,7 +359,36 @@ The current implementation stores secret values in macOS Keychain using:
 
 macrun also stores non-secret metadata in its local application config directory. That metadata powers commands such as `list`, `unset`, `purge`, and scoped selection.
 
-## 17. Security Model
+## 17. macOS Keychain Access Prompts After Rebuilds
+
+If macOS keeps asking for Keychain access every time you rebuild `macrun`, the usual cause is that the binary is not being signed with a stable identity.
+
+On macOS, Keychain access decisions are tied to the code identity of the calling binary. A rebuilt unsigned or ad-hoc binary can be treated as a new caller, which causes repeated approval prompts.
+
+Recommended development workflow:
+
+1. build and sign the debug binary with a stable identity every time
+3. approve access once for that identity
+
+Examples:
+
+```bash
+make build-signed
+```
+
+```bash
+make codesign-debug
+```
+
+For release builds:
+
+```bash
+make dist
+```
+
+The default signing mode is ad-hoc signing with the identifier `io.frogfish.macrun`. Override it with `CODESIGN_IDENTITY=...` and `SIGN_NAME=...` if your local policy needs a different identity.
+
+## 18. Security Model
 
 macrun helps reduce these common local-development failures:
 
@@ -378,7 +407,7 @@ It does not protect you from:
 
 The rule is simple: once a process receives a secret, that process is part of your trust boundary.
 
-## 18. Vault Bootstrap Transfer
+## 19. Vault Bootstrap Transfer
 
 macrun's Vault support is for bootstrap transfer: moving a high-value secret out of local Keychain and into its real system boundary without first dropping it into a plaintext file.
 
@@ -443,7 +472,7 @@ macrun vault push APP_CLIENT_SECRET API_TOKEN \
   --kv-version v2
 ```
 
-## 19. Vault Over an SSH Tunnel
+## 20. Vault Over an SSH Tunnel
 
 macrun does not create or manage SSH tunnels itself.
 
@@ -467,7 +496,7 @@ macrun vault encrypt APP_CLIENT_SECRET \
 
 If the remote Vault endpoint expects HTTPS with a certificate valid only for its original hostname, forwarding to `127.0.0.1` may cause hostname validation failures. That is a transport configuration issue rather than a macrun-specific behavior.
 
-## 20. Recommended Usage Patterns
+## 21. Recommended Usage Patterns
 
 Good patterns:
 
@@ -483,7 +512,7 @@ Patterns to avoid:
 - keeping large plaintext `.env` files around after import
 - sharing one env across unrelated environments
 
-## 21. Troubleshooting
+## 22. Troubleshooting
 
 `no project resolved`
 
@@ -506,6 +535,12 @@ Patterns to avoid:
 `VAULT_TOKEN is required`
 
 - export `VAULT_TOKEN` before using `macrun vault encrypt` or `macrun vault push`
+
+macOS asks for Keychain access after every rebuild
+
+- sign the binary with a stable code-signing identity
+- use `make build-signed`
+- if you already created secrets with an older caller identity, approve once again for the newly signed binary
 
 `purge` refuses to run
 

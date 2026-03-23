@@ -4,8 +4,18 @@
 APP := macrun
 DIST_DIR := dist
 DIST_BIN_DIR := $(DIST_DIR)/bin
+CODESIGN_IDENTITY ?= -
+SIGN_NAME ?= io.frogfish.macrun
+SIGN_FLAGS ?= --timestamp=none --identifier $(SIGN_NAME)
+BUILD_BIN := target/debug/$(APP)
+RELEASE_BIN := target/release/$(APP)
 
-.PHONY: bump clean dist
+.PHONY: bump build build-signed clean codesign-debug codesign-release dist
+
+build:
+	@cargo build
+
+build-signed: build codesign-debug
 
 bump:
 	@current="$$(tr -d '\n' < VERSION)"; \
@@ -34,13 +44,33 @@ bump:
 clean:
 	rm -rf target
 
+codesign-debug:
+	@if [ ! -x "$(BUILD_BIN)" ]; then \
+		echo "$(BUILD_BIN) does not exist; run make build or cargo build first" >&2; \
+		exit 1; \
+	fi
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(SIGN_FLAGS) "$(BUILD_BIN)"
+	@echo "signed $(BUILD_BIN) with $(CODESIGN_IDENTITY)"
+
+codesign-release:
+	@if [ ! -x "$(RELEASE_BIN)" ]; then \
+		echo "$(RELEASE_BIN) does not exist; run make dist or cargo build --release first" >&2; \
+		exit 1; \
+	fi
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(SIGN_FLAGS) "$(RELEASE_BIN)"
+	@echo "signed $(RELEASE_BIN) with $(CODESIGN_IDENTITY)"
+
 dist:
 	@build="$$(awk 'NR == 1 { print $$1 + 1; exit }' BUILD)"; \
 	printf '%s\n' "$$build" > BUILD; \
 	echo "BUILD=$$build"
 	@cargo build --release
+	@if [ -n "$(CODESIGN_IDENTITY)" ]; then \
+		codesign --force --sign "$(CODESIGN_IDENTITY)" $(SIGN_FLAGS) "$(RELEASE_BIN)"; \
+		echo "signed $(RELEASE_BIN) with $(CODESIGN_IDENTITY)"; \
+	fi
 	@mkdir -p $(DIST_BIN_DIR)
-	@cp target/release/$(APP) $(DIST_BIN_DIR)/$(APP)
+	@cp $(RELEASE_BIN) $(DIST_BIN_DIR)/$(APP)
 	@cp USER_GUIDE.md $(DIST_DIR)/USER_GUIDE.md
 	@cp README.md $(DIST_DIR)/README.md
 	@cp LICENSE $(DIST_DIR)/LICENSE

@@ -57,6 +57,16 @@ During development you can also run it directly:
 cargo run -- doctor
 ```
 
+If you use macrun heavily during local development on macOS, consider signing the debug binary with a stable local code identity. Rebuilt binaries can trigger repeated Keychain access prompts because macOS may treat each rebuilt binary as a new caller.
+
+The default Makefile workflow uses ad-hoc signing with a stable identifier, which works for local development on this machine:
+
+```bash
+make build-signed
+```
+
+If you prefer, you can still override the signing identity explicitly.
+
 To install the exact lockfile-resolved dependency set from a published release:
 
 ```bash
@@ -236,6 +246,29 @@ The current Keychain layout uses:
 - account: env var name
 
 Non-secret metadata is stored in the app config directory so macrun can efficiently list entries and track source and update time.
+
+## macOS Keychain Prompts During Development
+
+If macOS asks for Keychain access repeatedly after every rebuild, that is usually a code-signing identity problem rather than a macrun bug.
+
+Cause:
+
+- Keychain trust is associated with the binary's code identity
+- an unsigned or ad-hoc rebuilt binary can look like a different app after each build
+- macOS then asks again because the caller no longer matches the previously approved identity
+
+Recommended fix:
+
+1. sign the debug binary after each build with a stable identity or stable ad-hoc identifier
+3. approve Keychain access once for that signed identity
+
+Helpful targets:
+
+- `make build-signed`
+- `make codesign-debug`
+- `make dist`
+
+The default signing mode is ad-hoc signing with the identifier `io.frogfish.macrun`. You can override it with `CODESIGN_IDENTITY=...` and `SIGN_NAME=...` if needed.
 
 ## Vault Bootstrap Transfer
 

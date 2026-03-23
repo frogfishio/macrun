@@ -3,7 +3,7 @@
 
 [package]
 name = "macrun"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2021"
 authors = ["Alexander R. Croft"]
 description = "Keychain-backed local development secrets for macOS"
