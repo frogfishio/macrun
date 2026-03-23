@@ -14,50 +14,41 @@ impl IndexFile {
     pub fn upsert(&mut self, entry: StoredSecretMeta) {
         if let Some(existing) = self.entries.iter_mut().find(|candidate| {
             candidate.project == entry.project
-                && candidate.profile == entry.profile
+                && candidate.env == entry.env
                 && candidate.key == entry.key
         }) {
             *existing = entry;
         } else {
             self.entries.push(entry);
             self.entries.sort_by(|left, right| {
-                (&left.project, &left.profile, &left.key)
-                    .cmp(&(&right.project, &right.profile, &right.key))
+                (&left.project, &left.env, &left.key).cmp(&(&right.project, &right.env, &right.key))
             });
         }
     }
 
-    pub fn contains(&self, project: &str, profile: &str, key: &str) -> bool {
+    pub fn contains(&self, project: &str, env: &str, key: &str) -> bool {
         self.entries
             .iter()
-            .any(|entry| entry.project == project && entry.profile == profile && entry.key == key)
+            .any(|entry| entry.project == project && entry.env == env && entry.key == key)
     }
 
-    pub fn remove(&mut self, project: &str, profile: &str, key: &str) {
+    pub fn remove(&mut self, project: &str, env: &str, key: &str) {
         self.entries.retain(|entry| {
-            !(entry.project == project && entry.profile == profile && entry.key == key)
+            !(entry.project == project && entry.env == env && entry.key == key)
         });
     }
 
-    pub fn entries_for_scope(&self, project: &str, profile: &str) -> Vec<&StoredSecretMeta> {
+    pub fn entries_for_scope(&self, project: &str, env: &str) -> Vec<&StoredSecretMeta> {
         self.entries
             .iter()
-            .filter(|entry| entry.project == project && entry.profile == profile)
+            .filter(|entry| entry.project == project && entry.env == env)
             .collect()
     }
 
-    pub fn filtered_entries(
-        &self,
-        project: &str,
-        profile: &str,
-        prefixes: &[String],
-    ) -> Vec<StoredSecretMeta> {
+    pub fn entries_owned_for_scope(&self, project: &str, env: &str) -> Vec<StoredSecretMeta> {
         self.entries
             .iter()
-            .filter(|entry| entry.project == project && entry.profile == profile)
-            .filter(|entry| {
-                prefixes.is_empty() || prefixes.iter().any(|prefix| entry.key.starts_with(prefix))
-            })
+            .filter(|entry| entry.project == project && entry.env == env)
             .cloned()
             .collect()
     }
@@ -66,7 +57,8 @@ impl IndexFile {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StoredSecretMeta {
     pub project: String,
-    pub profile: String,
+    #[serde(alias = "profile")]
+    pub env: String,
     pub key: String,
     pub source: String,
     pub updated_at: String,
@@ -77,14 +69,14 @@ pub struct StoredSecretMeta {
 impl StoredSecretMeta {
     pub fn new(
         project: String,
-        profile: String,
+        env: String,
         key: String,
         source: String,
         note: Option<String>,
     ) -> Self {
         Self {
             project,
-            profile,
+            env,
             key,
             source,
             updated_at: iso_timestamp_now(),

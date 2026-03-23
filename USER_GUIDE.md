@@ -11,8 +11,10 @@ macrun stores local development secrets in macOS Keychain and injects them into 
 It is built around three ideas:
 
 - keep secret values out of repo files by default
-- scope secrets by project and profile
-- inject only the keys a process actually needs
+- scope secrets by project and env
+- keep each project/env scope internally coherent
+
+It also has usable fallback defaults, so basic commands can work without a setup step.
 
 ## 2. What macrun Is For
 
@@ -21,7 +23,7 @@ Good fit:
 - local app development on macOS
 - moving away from plaintext `.env` files
 - separating secrets between projects
-- separating secrets between profiles such as `dev` and `staging`
+- separating secrets between envs such as `dev` and `staging`
 - selectively injecting keys into a process
 
 Not a fit:
@@ -65,13 +67,14 @@ Current commands:
 - `env`
 - `unset`
 - `purge`
+- `vault encrypt`
 - `vault push`
 - `doctor`
 
 Global flags:
 
 - `--project NAME`
-- `--profile NAME`
+- `--env NAME`
 - `--json`
 
 ## 5. Scope Resolution
@@ -79,13 +82,13 @@ Global flags:
 Every secret belongs to a scope:
 
 - project
-- profile
+- env
 - env var name
 
 Example:
 
 - project: `my-app`
-- profile: `dev`
+- env: `dev`
 - key: `APP_DATABASE_URL`
 
 macrun resolves scope this way.
@@ -94,22 +97,29 @@ Project resolution order:
 
 1. explicit `--project`
 2. local `.macrun.toml` in the current directory or nearest ancestor
-3. failure
+3. internal default project scope
 
-Profile resolution order:
+Env resolution order:
 
-1. explicit `--profile`
-2. `default_profile` from `.macrun.toml`
+1. explicit `--env`
+2. `default_env` from `.macrun.toml`
 3. `dev`
 
-This is why `macrun init` is usually the first command you run in a project.
+If no explicit flag or local config is present, the fallback scope is:
+
+1. project: `(default)`
+2. env: `dev`
+
+This means `macrun set URL=https://somewhere` works even before you run `init`.
+
+`(default)` is just how macrun displays the fallback project scope. It is not a reserved user-facing project name, so `macrun --project default ...` still means the literal project `default`.
 
 ## 6. Initialize a Working Tree
 
 Create `.macrun.toml` in the current directory:
 
 ```bash
-macrun init --project my-app --profile dev
+macrun init --project my-app --env dev
 ```
 
 That file binds the working tree to a default scope.
@@ -117,10 +127,12 @@ That file binds the working tree to a default scope.
 If you need to overwrite an existing file:
 
 ```bash
-macrun init --project my-app --profile dev --force
+macrun init --project my-app --env dev --force
 ```
 
-The generated config is a small TOML file with the project name and default profile.
+The generated config is a small TOML file with the project name and default env.
+
+`init` is optional. It is useful when you want the current working tree to resolve to a non-default project or env automatically.
 
 ## 7. Store Secrets
 
@@ -179,12 +191,6 @@ Overwrite existing keys intentionally:
 macrun import -f .env --replace
 ```
 
-Import only selected prefixes:
-
-```bash
-macrun import -f .env --prefix APP_ --prefix API_
-```
-
 The importer currently accepts plain lines in these forms:
 
 - `KEY=value`
@@ -212,12 +218,6 @@ List keys only:
 macrun list
 ```
 
-List only a subset by prefix:
-
-```bash
-macrun list --prefix APP_
-```
-
 Show metadata such as source and update time:
 
 ```bash
@@ -231,13 +231,13 @@ By default, `list` does not print secret values.
 Shell output:
 
 ```bash
-macrun env --format shell --prefix APP_
+macrun env --format shell
 ```
 
 JSON output:
 
 ```bash
-macrun env --format json --only APP_DATABASE_URL
+macrun env --format json
 ```
 
 This command is most useful for inspection, scripting, and debugging.
@@ -248,39 +248,56 @@ The safer default for interactive work is still to use `exec` rather than export
 
 This is the main workflow.
 
-Inject all keys that share a prefix:
+Inject the entire active scope:
 
 ```bash
-macrun exec --prefix APP_ -- cargo run
-```
-
-Inject an explicit set of keys:
-
-```bash
-macrun exec \
-  --only APP_DATABASE_URL \
-  --only APP_SESSION_SECRET \
-  -- node server.js
+macrun exec -- cargo run
 ```
 
 Run a non-Rust command:
 
 ```bash
-macrun exec --prefix APP_ -- python3 manage.py runserver
+macrun exec -- python3 manage.py runserver
+```
+
+Bootstrap an app with Vault Transit ciphertext instead of plaintext for one key:
+
+```bash
+macrun exec \
+  --vault-encrypt APP_CLIENT_SECRET=APP_CLIENT_SECRET_CIPHERTEXT \
+  --vault-addr http://127.0.0.1:8200 \
+  --vault-key app-secrets \
+  -- myapp
 ```
 
 Behavior to expect:
 
-- the selected keys are loaded from Keychain
-- the child process inherits the normal parent environment plus the selected secret values
+- every key in the current scope is loaded from Keychain
+- the child process inherits the normal parent environment plus every secret value in that scope
 - macrun prints a short scope summary to stderr before launching
 - the child process exit code is returned unchanged when possible
 
-If no keys match your selection, `exec` fails rather than silently running with an empty secret set.
+When `--vault-encrypt` is used:
 
-## 13. Use Multiple Profiles
+- macrun reads the named plaintext secret from Keychain
+- encrypts it with Vault Transit before launching the child process
+- removes the plaintext source variable from the child environment
+- injects the ciphertext under the destination variable name
 
-Profiles let you keep separate local contexts inside one project.
+`SRC=DST` means:
+
+- `SRC` is the secret name in macrun Keychain storage
+- `DST` is the env var name the child process receives
+
+If you pass only `SRC`, macrun replaces that same env var with ciphertext.
+
+This is intentional bootstrap behavior: the child process should not receive both the plaintext source variable and the ciphertext replacement unless you explicitly model that as two separate stored secrets.
+
+If the scope has no stored keys, `exec` fails rather than silently running with an empty secret set.
+
+## 13. Use Multiple Envs
+
+Envs let you keep separate local contexts inside one project.
 
 Examples:
 
@@ -289,24 +306,24 @@ Examples:
 - `staging`
 - `customer-a`
 
-Store different values under different profiles:
+Store different values under different envs:
 
 ```bash
-macrun --project my-app --profile dev set APP_DATABASE_URL=postgres://localhost/devdb
-macrun --project my-app --profile staging set APP_DATABASE_URL=postgres://localhost/stagingdb
+macrun --project my-app --env dev set APP_DATABASE_URL=postgres://localhost/devdb
+macrun --project my-app --env staging set APP_DATABASE_URL=postgres://localhost/stagingdb
 ```
 
-Run against a specific profile:
+Run against a specific env:
 
 ```bash
-macrun --project my-app --profile staging exec --prefix APP_ -- cargo run
+macrun --project my-app --env staging exec -- cargo run
 ```
 
-Profiles are useful when the variable names stay the same but the actual endpoints or credentials change.
+Envs are useful when the variable names stay the same but the actual endpoints or credentials change.
 
 ## 14. Purge a Scope
 
-Remove every indexed secret for the active project and profile:
+Remove every indexed secret for the active project and env:
 
 ```bash
 macrun purge --yes
@@ -326,18 +343,18 @@ macrun doctor
 
 - current working directory
 - whether a local `.macrun.toml` was found
-- the resolved project and profile, if any
+- the resolved project and env, if any
 - the local state directory
 - the index path
 - how many secrets are indexed overall and in the current scope
 
-If you are unsure why a command cannot resolve a project or profile, start with `doctor`.
+If you are unsure why a command cannot resolve a project or env, start with `doctor`.
 
 ## 16. Storage Details
 
 The current implementation stores secret values in macOS Keychain using:
 
-- service: `macrun/<project>/<profile>`
+- service: `macrun/<project>/<env>`
 - account: env var name
 
 macrun also stores non-secret metadata in its local application config directory. That metadata powers commands such as `list`, `unset`, `purge`, and scoped selection.
@@ -349,7 +366,7 @@ macrun helps reduce these common local-development failures:
 - committing plaintext `.env` files
 - leaving sensitive values in repo-local files
 - contaminating a long-lived shell session with broad exports
-- mixing up projects or profiles
+- mixing up projects or envs
 - oversharing secrets to commands that do not need them
 
 It does not protect you from:
@@ -361,15 +378,34 @@ It does not protect you from:
 
 The rule is simple: once a process receives a secret, that process is part of your trust boundary.
 
-## 18. Vault Transit Workflow
+## 18. Vault Bootstrap Transfer
 
-macrun includes a Vault transit integration through `vault push`.
+macrun's Vault support is for bootstrap transfer: moving a high-value secret out of local Keychain and into its real system boundary without first dropping it into a plaintext file.
+
+There are two separate patterns.
+
+### Transit ciphertext for application databases
+
+Use `vault encrypt` when an app must keep a key in its own database.
 
 That workflow:
 
 1. reads a plaintext secret from Keychain
-2. encrypts it with Vault transit
-3. can verify decrypt without printing plaintext
+2. encrypts it with Vault Transit
+3. prints the ciphertext so it can be stored downstream
+4. can verify decrypt without printing plaintext
+
+The app then stores the ciphertext and asks Vault Transit to decrypt it when needed, usually caching the plaintext only in memory.
+
+If you are bootstrapping the app directly with `macrun exec`, the same pattern can be used without an intermediate copy step:
+
+```bash
+macrun exec \
+  --vault-encrypt APP_CLIENT_SECRET=APP_CLIENT_SECRET_CIPHERTEXT \
+  --vault-addr http://127.0.0.1:8200 \
+  --vault-key app-secrets \
+  -- myapp
+```
 
 Vault authentication currently uses `VAULT_TOKEN` from the environment.
 
@@ -378,11 +414,33 @@ Example:
 ```bash
 export VAULT_TOKEN=...
 
-macrun vault push APP_CLIENT_SECRET \
+macrun vault encrypt APP_CLIENT_SECRET \
   --vault-addr http://127.0.0.1:8200 \
   --transit-path transit \
   --vault-key app-secrets \
   --verify-decrypt
+```
+
+### Vault KV as shared secret storage
+
+Use `vault push` when Vault itself should store the secrets and the app will fetch them from Vault directly.
+
+That workflow:
+
+1. reads one or more plaintext secrets from Keychain
+2. writes them into Vault KV at a chosen mount and path
+3. leaves Vault as the source of truth for the app-side read path
+
+Example:
+
+```bash
+export VAULT_TOKEN=...
+
+macrun vault push APP_CLIENT_SECRET API_TOKEN \
+  --vault-addr http://127.0.0.1:8200 \
+  --mount secret \
+  --path apps/my-app/dev \
+  --kv-version v2
 ```
 
 ## 19. Vault Over an SSH Tunnel
@@ -402,7 +460,7 @@ Then in another shell:
 ```bash
 export VAULT_TOKEN=...
 
-macrun vault push APP_CLIENT_SECRET \
+macrun vault encrypt APP_CLIENT_SECRET \
   --vault-addr http://127.0.0.1:18200 \
   --vault-key app-secrets \
 ```
@@ -415,15 +473,15 @@ Good patterns:
 
 - initialize each working tree once with `macrun init`
 - keep local secrets in Keychain instead of repo files
-- use profiles to separate materially different contexts
-- inject only the keys a command needs
+- use envs to separate materially different contexts
+- keep each env self-contained so a command can consume the whole scope
 - use `doctor` when scope resolution is unclear
 
 Patterns to avoid:
 
 - exporting your entire secret set into a long-lived shell session
 - keeping large plaintext `.env` files around after import
-- sharing one profile across unrelated environments
+- sharing one env across unrelated environments
 
 ## 21. Troubleshooting
 
@@ -433,11 +491,11 @@ Patterns to avoid:
 - check whether `.macrun.toml` exists in the current directory or an ancestor
 - pass `--project` explicitly if needed
 
-`requested secret(s) not found`
+`exec` says there are no secrets in the current scope
 
-- verify the key names with `macrun list`
-- check whether you selected the wrong profile
-- confirm your `--only` or `--prefix` filters match stored keys
+- verify the scope with `macrun doctor`
+- check the stored names with `macrun list`
+- confirm you are using the intended project and env
 
 `import` fails on a line in `.env`
 
@@ -447,7 +505,7 @@ Patterns to avoid:
 
 `VAULT_TOKEN is required`
 
-- export `VAULT_TOKEN` before using `macrun vault push`
+- export `VAULT_TOKEN` before using `macrun vault encrypt` or `macrun vault push`
 
 `purge` refuses to run
 

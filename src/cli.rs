@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
-const TOP_LEVEL_LONG_ABOUT: &str = "macrun stores local development secrets in macOS Keychain and injects them into child processes only when you ask it to.\n\nIt is designed to replace ad hoc .env files and broad shell exports with project-aware, profile-aware secret injection.";
+const TOP_LEVEL_LONG_ABOUT: &str = "macrun stores local development secrets in macOS Keychain and injects them into child processes only when you ask it to.\n\nIt is designed to replace ad hoc .env files and broad shell exports with project-aware, env-aware secret injection.";
 
-const TOP_LEVEL_AFTER_HELP: &str = "Examples:\n  macrun init --project my-app --profile dev\n  macrun import -f .env\n  macrun exec --prefix APP_ -- cargo run\n  macrun vault push APP_CLIENT_SECRET --vault-addr http://127.0.0.1:8200 --vault-key app-secrets\n\nUse `macrun <command> --help` for command-specific guidance.";
+const TOP_LEVEL_AFTER_HELP: &str = "Examples:\n  macrun set URL=https://somewhere\n  macrun init --project my-app --env dev\n  macrun exec -- cargo run\n  macrun env --format json\n\nUse `macrun exec --help` and `macrun vault --help` for bootstrap-transfer examples.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -28,13 +28,8 @@ pub struct Cli {
     )]
     pub project: Option<String>,
 
-    #[arg(
-        long,
-        global = true,
-        value_name = "PROFILE",
-        help = "Override the resolved profile scope"
-    )]
-    pub profile: Option<String>,
+    #[arg(long, global = true, value_name = "ENV", help = "Override the resolved env scope")]
+    pub env: Option<String>,
 
     #[arg(
         long,
@@ -67,13 +62,13 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    #[command(about = "Bind the current working tree to a project and default profile")]
+    #[command(about = "Bind the current working tree to a named project and env")]
     Init {
         #[arg(long, value_name = "PROJECT", help = "Project name to bind to this tree")]
         project: Option<String>,
 
-        #[arg(long, value_name = "PROFILE", help = "Default profile for this tree")]
-        profile: Option<String>,
+        #[arg(long, value_name = "ENV", help = "Default env for this tree")]
+        env: Option<String>,
 
         #[arg(long, help = "Overwrite an existing .macrun.toml file")]
         force: bool,
@@ -102,9 +97,6 @@ pub enum Commands {
         #[arg(long, help = "Replace existing stored values when keys already exist")]
         replace: bool,
 
-        #[arg(long = "prefix", value_name = "PREFIX", help = "Import only keys that start with this prefix")]
-        prefixes: Vec<String>,
-
         #[arg(long, default_value = "import", help = "Metadata source label for imported secrets")]
         source: String,
     },
@@ -112,46 +104,60 @@ pub enum Commands {
     List {
         #[arg(long, help = "Show source, update time, and note metadata")]
         show_metadata: bool,
-
-        #[arg(long = "prefix", value_name = "PREFIX", help = "List only keys that start with this prefix")]
-        prefixes: Vec<String>,
     },
     #[command(
-        about = "Run a command with selected secrets injected",
-        after_help = "Examples:\n  macrun exec --prefix APP_ -- cargo run\n  macrun exec --only APP_DATABASE_URL --only APP_SESSION_SECRET -- python3 server.py"
+        about = "Run a command with every secret from the active scope injected",
+        after_help = "Examples:\n  macrun exec -- cargo run\n  macrun exec -- python3 server.py\n  macrun exec --vault-encrypt APP_CLIENT_SECRET=APP_SECRET_CIPHERTEXT --vault-addr http://127.0.0.1:8200 --vault-key app-secrets -- app"
     )]
     Exec {
-        #[arg(long = "only", value_name = "NAME", help = "Inject only this specific key")]
-        only: Vec<String>,
+        #[arg(
+            long,
+            value_name = "SRC[=DST]",
+            help = "Replace a plaintext secret with Vault Transit ciphertext in the child environment"
+        )]
+        vault_encrypt: Vec<String>,
 
-        #[arg(long = "prefix", value_name = "PREFIX", help = "Inject all keys that start with this prefix")]
-        prefixes: Vec<String>,
+        #[arg(
+            long,
+            value_name = "URL",
+            help = "Vault base URL for --vault-encrypt, for example http://127.0.0.1:8200"
+        )]
+        vault_addr: Option<String>,
+
+        #[arg(
+            long,
+            default_value = "transit",
+            value_name = "PATH",
+            help = "Transit mount path for --vault-encrypt"
+        )]
+        transit_path: String,
+
+        #[arg(
+            long,
+            value_name = "KEY",
+            help = "Vault transit key name for --vault-encrypt"
+        )]
+        vault_key: Option<String>,
 
         #[arg(last = true, required = true, value_name = "COMMAND", help = "Command to execute after --")]
         command: Vec<String>,
     },
-    #[command(about = "Print selected secrets as shell exports or JSON")]
+    #[command(about = "Print all secrets in the active scope as shell exports or JSON")]
     Env {
         #[arg(long, value_enum, default_value = "shell", help = "Output format")]
         format: EnvFormat,
-
-        #[arg(long = "only", value_name = "NAME", help = "Print only this specific key")]
-        only: Vec<String>,
-
-        #[arg(long = "prefix", value_name = "PREFIX", help = "Print only keys that start with this prefix")]
-        prefixes: Vec<String>,
     },
     #[command(about = "Remove one or more stored secrets from the active scope")]
     Unset {
         #[arg(required = true, value_name = "NAME", help = "Secret names to remove")]
         names: Vec<String>,
     },
-    #[command(about = "Delete every stored secret in the active project/profile scope")]
+    #[command(about = "Delete every stored secret in the active project/env scope")]
     Purge {
         #[arg(long, help = "Required confirmation for destructive purge")]
         yes: bool,
     },
-    #[command(about = "Encrypt a stored secret with Vault transit")]
+    #[command(about = "Transfer stored secrets into Vault for bootstrap workflows")]
     Vault {
         #[command(subcommand)]
         command: VaultCommands,
@@ -164,10 +170,10 @@ pub enum Commands {
 pub enum VaultCommands {
     #[command(
         about = "Encrypt a stored secret using Vault transit",
-        long_about = "Read a stored secret from Keychain, encrypt it with Vault transit, and print safe metadata without ever printing plaintext.",
-        after_help = "Example:\n  macrun vault push APP_CLIENT_SECRET --vault-addr http://127.0.0.1:8200 --vault-key app-secrets --verify-decrypt"
+        long_about = "Read a stored secret from Keychain, encrypt it with Vault transit, and print ciphertext for use in an application database or another downstream system.",
+        after_help = "Example:\n  macrun vault encrypt APP_CLIENT_SECRET --vault-addr http://127.0.0.1:8200 --vault-key app-secrets --verify-decrypt"
     )]
-    Push {
+    Encrypt {
         #[arg(value_name = "ENV_KEY", help = "Stored secret name to encrypt")]
         env_key: String,
 
@@ -183,10 +189,37 @@ pub enum VaultCommands {
         #[arg(long, help = "Verify a decrypt round-trip without printing plaintext")]
         verify_decrypt: bool,
     },
+    #[command(
+        about = "Write one or more stored secrets into Vault KV",
+        long_about = "Read one or more stored secrets from Keychain and write them into Vault KV so applications can fetch them directly from Vault instead of storing them in a database.",
+        after_help = "Examples:\n  macrun vault push APP_CLIENT_SECRET --vault-addr http://127.0.0.1:8200 --path apps/my-app/dev\n  macrun vault push APP_CLIENT_SECRET API_TOKEN --vault-addr http://127.0.0.1:8200 --mount secret --path apps/my-app/dev --kv-version v2"
+    )]
+    Push {
+        #[arg(required = true, value_name = "ENV_KEY", help = "Stored secret names to write into Vault")]
+        env_keys: Vec<String>,
+
+        #[arg(long, value_name = "URL", help = "Vault base URL, for example http://127.0.0.1:8200")]
+        vault_addr: String,
+
+        #[arg(long, default_value = "secret", value_name = "MOUNT", help = "Vault KV mount name")]
+        mount: String,
+
+        #[arg(long, value_name = "PATH", help = "Logical Vault KV path below the mount")]
+        path: String,
+
+        #[arg(long, value_enum, default_value = "v2", help = "Vault KV engine version")]
+        kv_version: KvVersionArg,
+    },
 }
 
 #[derive(Clone, Debug, ValueEnum)]
 pub enum EnvFormat {
     Shell,
     Json,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum KvVersionArg {
+    V1,
+    V2,
 }

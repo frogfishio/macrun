@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Alexander R. Croft
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::BTreeSet;
-
 use anyhow::{anyhow, bail, Result};
 
-use crate::index::StoredSecretMeta;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvMapping {
+    pub source: String,
+    pub target: String,
+}
 
 pub fn parse_pair(input: &str) -> Result<(String, String)> {
     let (name, value) = input
@@ -13,6 +15,23 @@ pub fn parse_pair(input: &str) -> Result<(String, String)> {
         .ok_or_else(|| anyhow!("expected NAME=value, got `{input}`"))?;
     validate_env_name(name)?;
     Ok((name.to_owned(), value.to_owned()))
+}
+
+pub fn parse_env_mapping(input: &str) -> Result<EnvMapping> {
+    if let Some((source, target)) = input.split_once('=') {
+        validate_env_name(source)?;
+        validate_env_name(target)?;
+        Ok(EnvMapping {
+            source: source.to_owned(),
+            target: target.to_owned(),
+        })
+    } else {
+        validate_env_name(input)?;
+        Ok(EnvMapping {
+            source: input.to_owned(),
+            target: input.to_owned(),
+        })
+    }
 }
 
 pub fn parse_env_file(contents: &str) -> Result<Vec<(String, String)>> {
@@ -30,40 +49,6 @@ pub fn parse_env_file(contents: &str) -> Result<Vec<(String, String)>> {
         parsed.push((name.trim().to_owned(), unquote(value.trim())));
     }
     Ok(parsed)
-}
-
-pub fn select_entries<'a>(
-    entries: Vec<&'a StoredSecretMeta>,
-    only: &[String],
-    prefixes: &[String],
-) -> Result<Vec<&'a StoredSecretMeta>> {
-    if only.is_empty() && prefixes.is_empty() {
-        return Ok(entries);
-    }
-
-    let only_set: BTreeSet<&str> = only.iter().map(String::as_str).collect();
-    for key in &only_set {
-        validate_env_name(key)?;
-    }
-
-    let selected: Vec<&StoredSecretMeta> = entries
-        .into_iter()
-        .filter(|entry| {
-            only_set.contains(entry.key.as_str())
-                || prefixes.iter().any(|prefix| entry.key.starts_with(prefix))
-        })
-        .collect();
-
-    let selected_names: BTreeSet<&str> = selected.iter().map(|entry| entry.key.as_str()).collect();
-    let missing: Vec<&str> = only_set
-        .into_iter()
-        .filter(|name| !selected_names.contains(name))
-        .collect();
-    if !missing.is_empty() {
-        bail!("requested secret(s) not found: {}", missing.join(", "));
-    }
-
-    Ok(selected)
 }
 
 pub fn validate_env_name(name: &str) -> Result<()> {
@@ -109,8 +94,7 @@ fn unquote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_env_file, parse_pair, select_entries, shell_quote};
-    use crate::index::StoredSecretMeta;
+    use super::{parse_env_file, parse_env_mapping, parse_pair, shell_quote, EnvMapping};
 
     #[test]
     fn parse_pair_accepts_basic_assignment() {
@@ -131,30 +115,29 @@ mod tests {
     }
 
     #[test]
-    fn select_entries_respects_only_and_prefix() {
-        let entries = vec![
-            StoredSecretMeta::new(
-                "my-app".into(),
-                "dev".into(),
-                "RBAC_JWT_SECRET".into(),
-                "manual".into(),
-                None,
-            ),
-            StoredSecretMeta::new(
-                "my-app".into(),
-                "dev".into(),
-                "APP_API_KEY".into(),
-                "manual".into(),
-                None,
-            ),
-        ];
-        let refs = entries.iter().collect::<Vec<_>>();
-        let selected = select_entries(refs, &["RBAC_JWT_SECRET".into()], &["APP_".into()]).unwrap();
-        assert_eq!(selected.len(), 2);
+    fn shell_quote_wraps_single_quotes() {
+        assert_eq!(shell_quote("ab'cd"), "'ab'\\''cd'");
     }
 
     #[test]
-    fn shell_quote_wraps_single_quotes() {
-        assert_eq!(shell_quote("ab'cd"), "'ab'\\''cd'");
+    fn parse_env_mapping_defaults_target_to_source() {
+        assert_eq!(
+            parse_env_mapping("APP_CLIENT_SECRET").unwrap(),
+            EnvMapping {
+                source: "APP_CLIENT_SECRET".to_owned(),
+                target: "APP_CLIENT_SECRET".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_env_mapping_accepts_source_and_target() {
+        assert_eq!(
+            parse_env_mapping("APP_CLIENT_SECRET=APP_CLIENT_SECRET_CIPHERTEXT").unwrap(),
+            EnvMapping {
+                source: "APP_CLIENT_SECRET".to_owned(),
+                target: "APP_CLIENT_SECRET_CIPHERTEXT".to_owned(),
+            }
+        );
     }
 }

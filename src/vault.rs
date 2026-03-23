@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Alexander R. Croft
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::collections::BTreeMap;
+
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -11,22 +13,18 @@ use serde::{Deserialize, Serialize};
 pub struct VaultClient {
     client: Client,
     vault_addr: String,
-    transit_path: String,
 }
 
 impl VaultClient {
-    pub fn from_env(vault_addr: &str, transit_path: &str) -> Result<Self> {
+    pub fn from_env(vault_addr: &str) -> Result<Self> {
         let token = std::env::var("VAULT_TOKEN")
-            .map_err(|_| anyhow!("VAULT_TOKEN is required for `macrun vault push`"))?;
-        Self::new(vault_addr, transit_path, &token)
+            .map_err(|_| anyhow!("VAULT_TOKEN is required for Vault operations"))?;
+        Self::new(vault_addr, &token)
     }
 
-    pub fn new(vault_addr: &str, transit_path: &str, token: &str) -> Result<Self> {
+    pub fn new(vault_addr: &str, token: &str) -> Result<Self> {
         if vault_addr.trim().is_empty() {
             bail!("vault address cannot be empty");
-        }
-        if transit_path.trim().is_empty() {
-            bail!("transit path cannot be empty");
         }
         if token.trim().is_empty() {
             bail!("Vault token cannot be empty");
@@ -46,16 +44,23 @@ impl VaultClient {
         Ok(Self {
             client,
             vault_addr: vault_addr.trim_end_matches('/').to_owned(),
-            transit_path: transit_path.trim_matches('/').to_owned(),
         })
     }
 
-    pub fn encrypt(&self, key_name: &str, plaintext: &[u8]) -> Result<EncryptResponse> {
+    pub fn encrypt(
+        &self,
+        transit_path: &str,
+        key_name: &str,
+        plaintext: &[u8],
+    ) -> Result<EncryptResponse> {
+        if transit_path.trim().is_empty() {
+            bail!("transit path cannot be empty");
+        }
         if key_name.trim().is_empty() {
             bail!("vault key cannot be empty");
         }
 
-        let url = self.endpoint(&format!("encrypt/{key_name}"));
+        let url = self.endpoint(transit_path, &format!("encrypt/{key_name}"));
         let payload = EncryptRequest {
             plaintext: STANDARD.encode(plaintext),
         };
@@ -80,12 +85,15 @@ impl VaultClient {
         })
     }
 
-    pub fn decrypt(&self, key_name: &str, ciphertext: &str) -> Result<String> {
+    pub fn decrypt(&self, transit_path: &str, key_name: &str, ciphertext: &str) -> Result<String> {
+        if transit_path.trim().is_empty() {
+            bail!("transit path cannot be empty");
+        }
         if key_name.trim().is_empty() {
             bail!("vault key cannot be empty");
         }
 
-        let url = self.endpoint(&format!("decrypt/{key_name}"));
+        let url = self.endpoint(transit_path, &format!("decrypt/{key_name}"));
         let payload = DecryptRequest {
             ciphertext: ciphertext.to_owned(),
         };
@@ -111,9 +119,65 @@ impl VaultClient {
         String::from_utf8(decoded).context("Vault transit plaintext was not valid UTF-8")
     }
 
-    fn endpoint(&self, suffix: &str) -> String {
-        format!("{}/v1/{}/{}", self.vault_addr, self.transit_path, suffix)
+    pub fn kv_put(
+        &self,
+        mount: &str,
+        path: &str,
+        kv_version: KvVersion,
+        data: BTreeMap<String, String>,
+    ) -> Result<()> {
+        let mount = mount.trim_matches('/');
+        let path = path.trim_matches('/');
+        if mount.is_empty() {
+            bail!("Vault mount cannot be empty");
+        }
+        if path.is_empty() {
+            bail!("Vault path cannot be empty");
+        }
+        if data.is_empty() {
+            bail!("at least one secret is required to write to Vault");
+        }
+
+        let suffix = match kv_version {
+            KvVersion::V1 => path.to_owned(),
+            KvVersion::V2 => format!("data/{path}"),
+        };
+        let url = self.endpoint(mount, &suffix);
+        let payload = match kv_version {
+            KvVersion::V1 => serde_json::json!(data),
+            KvVersion::V2 => serde_json::json!({ "data": data }),
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .with_context(|| format!("failed to write secrets to Vault KV at {url}"))?;
+
+        let status = response.status();
+        let body = response.text().context("failed to read Vault response body")?;
+        if !status.is_success() {
+            bail!("Vault KV write failed with {status}: {body}");
+        }
+
+        Ok(())
     }
+
+    fn endpoint(&self, mount: &str, suffix: &str) -> String {
+        format!(
+            "{}/v1/{}/{}",
+            self.vault_addr,
+            mount.trim_matches('/'),
+            suffix.trim_matches('/')
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum KvVersion {
+    V1,
+    V2,
 }
 
 pub fn parse_key_version(ciphertext: &str) -> Option<u32> {

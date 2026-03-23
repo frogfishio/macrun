@@ -12,7 +12,8 @@ pub const CONFIG_FILE_NAME: &str = ".macrun.toml";
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LocalConfig {
     pub project: String,
-    pub default_profile: String,
+    #[serde(alias = "default_profile")]
+    pub default_env: String,
 }
 
 #[derive(Clone, Debug)]
@@ -24,7 +25,7 @@ pub struct LocalConfigHit {
 #[derive(Clone, Debug, Serialize)]
 pub struct ResolvedScope {
     pub project: String,
-    pub profile: String,
+    pub env: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_path: Option<PathBuf>,
 }
