@@ -25,6 +25,7 @@ It helps by:
 - scoping secrets by project and env
 - importing from existing `.env` files when needed
 - keeping the main workflow centered on whole-scope `macrun exec -- ...`
+- exporting encrypted `.env.macrun` files for check-in or recovery when you need a durable sealed copy
 
 ## What It Is Not
 
@@ -157,6 +158,8 @@ Implemented today:
 - `unset`
 - `purge --yes`
 - `doctor`
+- `master`
+- `archive`
 - `vault encrypt`
 - `vault push`
 
@@ -205,6 +208,13 @@ Remove keys:
 macrun unset APP_SESSION_SECRET API_TOKEN
 ```
 
+Export the current scope into an encrypted `.env.macrun` file:
+
+```bash
+macrun master set
+macrun archive export --mode scope --file .env.macrun
+```
+
 ## Project and Env Resolution
 
 macrun can resolve the active scope from a local config file named `.macrun.toml`.
@@ -248,6 +258,53 @@ The current Keychain layout uses one bundled item per project:
 Inside that bundle, secrets remain grouped by env.
 
 Non-secret metadata is stored in the app config directory so macrun can efficiently list entries and track source and update time.
+
+## Encrypted `.env.macrun` Files
+
+macrun can seal a scope into an encrypted `.env.macrun` file using a global master secret stored separately in Keychain.
+
+This is useful when:
+
+- you want a durable encrypted backup of a scope
+- you want to check in a sealed secret file without storing plaintext
+- you want to move a scope to another machine and re-import it with the same master secret
+
+The master secret is write-only from the CLI: you can set it, clear it, or check whether it exists, but macrun does not print it back.
+
+Set the master secret:
+
+```bash
+macrun master set
+```
+
+Or from stdin for automation:
+
+```bash
+printf '%s' 'correct horse battery staple' | macrun master set --stdin
+```
+
+Export the active scope explicitly:
+
+```bash
+macrun archive export --mode scope --file .env.macrun
+```
+
+Export the whole project bundle, including every env stored under that project:
+
+```bash
+macrun --project my-app archive export --mode project --file my-app.macrun
+```
+
+Import it later:
+
+```bash
+macrun archive import --file .env.macrun
+```
+
+By default, import restores whatever is embedded in the sealed file.
+
+- scope archives restore one project/env scope and can be overridden with `--project` and `--env`
+- project archives restore every env in that project and can be overridden with `--project` only
 
 ## macOS Keychain Prompts During Development
 

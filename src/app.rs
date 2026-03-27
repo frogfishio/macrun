@@ -4,19 +4,23 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use anyhow::{anyhow, bail, Context, Result};
 use directories::ProjectDirs;
+use rpassword::prompt_password;
 
-use crate::cli::{Cli, Commands, EnvFormat, KvVersionArg, VaultCommands};
+use crate::cli::{ArchiveCommands, ArchiveExportMode, Cli, Commands, EnvFormat, KvVersionArg, MasterCommands, VaultCommands};
 use crate::config::{find_local_config, LocalConfig, ResolvedScope, CONFIG_FILE_NAME};
 use crate::index::{IndexFile, StoredSecretMeta};
 use crate::keychain::{
-    delete_legacy_secret, delete_secret, read_legacy_secret, read_project_bundle, read_scope_secrets,
-    read_secret, store_secret, write_project_bundle, write_scope_secrets,
+    clear_master_secret, delete_legacy_secret, delete_secret, has_master_secret, read_legacy_secret,
+    read_master_secret, read_project_bundle, read_scope_secrets, read_secret, store_secret,
+    write_master_secret, write_project_bundle, write_scope_secrets,
 };
+use crate::sealed::{open_scope, seal_scope, SealedScopeFile, SealedScopePayload};
 use crate::util::{parse_env_file, parse_env_mapping, parse_pair, shell_quote, validate_env_name, EnvMapping};
 use crate::vault::{parse_key_version, KvVersion, VaultClient};
 
@@ -135,9 +139,296 @@ impl App {
                     ),
                 }
             }
+            Some(Commands::Master { command }) => match command {
+                MasterCommands::Set { stdin } => self.master_set(stdin, cli.json),
+                MasterCommands::Clear => self.master_clear(cli.json),
+                MasterCommands::Status => self.master_status(cli.json),
+            },
+            Some(Commands::Archive { command }) => match command {
+                ArchiveCommands::Export { file, mode } => {
+                    let scope = self.resolve_runtime_scope(cli.project, cli.env)?;
+                    self.archive_export(&scope, mode, &file, cli.json)
+                }
+                ArchiveCommands::Import { file, replace } => {
+                    self.archive_import(cli.project, cli.env, &file, replace, cli.json)
+                }
+            },
             Some(Commands::Doctor) => self.doctor(cli.project, cli.env, cli.json),
             None => bail!("no command provided"),
         }
+    }
+
+    fn master_set(&self, stdin: bool, json: bool) -> Result<ExitCode> {
+        let secret = if stdin {
+            let mut buffer = String::new();
+            io::stdin()
+                .read_to_string(&mut buffer)
+                .context("failed to read master secret from stdin")?;
+            buffer.trim_end_matches(['\n', '\r']).to_owned()
+        } else {
+            let first = prompt_password("master secret: ").context("failed to read master secret")?;
+            let second = prompt_password("confirm master secret: ")
+                .context("failed to read master secret confirmation")?;
+            if first != second {
+                bail!("master secret confirmation did not match");
+            }
+            first
+        };
+
+        if secret.is_empty() {
+            bail!("master secret cannot be empty");
+        }
+
+        write_master_secret(&secret)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "configured": true }))?);
+        } else {
+            println!("master secret stored");
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    fn master_clear(&self, json: bool) -> Result<ExitCode> {
+        clear_master_secret()?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "configured": false }))?);
+        } else {
+            println!("master secret cleared");
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    fn master_status(&self, json: bool) -> Result<ExitCode> {
+        let configured = has_master_secret()?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "configured": configured }))?);
+        } else {
+            println!("master secret: {}", if configured { "configured" } else { "missing" });
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    fn archive_export(
+        &self,
+        scope: &ResolvedScope,
+        mode: ArchiveExportMode,
+        file: &Path,
+        json: bool,
+    ) -> Result<ExitCode> {
+        let master_secret = read_master_secret()
+            .context("master secret is not configured; run `macrun master set`")?;
+        let payload = match mode {
+            ArchiveExportMode::Scope => {
+                let secrets = self.selected_env(scope)?;
+                if secrets.is_empty() {
+                    bail!("no secrets stored for the current project/env scope");
+                }
+                SealedScopePayload::Scope {
+                    project: self.export_project_name(scope).to_owned(),
+                    env: scope.env.clone(),
+                    secrets,
+                }
+            }
+            ArchiveExportMode::Project => {
+                let bundle = read_project_bundle(&scope.project)?;
+                if bundle.envs.is_empty() {
+                    bail!("no secrets stored for the current project");
+                }
+                SealedScopePayload::Project {
+                    project: self.export_project_name(scope).to_owned(),
+                    envs: bundle.envs,
+                }
+            }
+        };
+        let sealed = seal_scope(&master_secret, &payload)?;
+        self.write_json_file(file, &sealed)?;
+
+        if json {
+            let metadata = match &payload {
+                SealedScopePayload::Scope {
+                    project,
+                    env,
+                    secrets,
+                } => serde_json::json!({
+                    "file": file,
+                    "mode": "scope",
+                    "target": "resolved_scope",
+                    "project": project,
+                    "env": env,
+                    "secrets": secrets.len(),
+                }),
+                SealedScopePayload::Project { project, envs } => {
+                    let secret_count: usize = envs.values().map(|secrets| secrets.len()).sum();
+                    serde_json::json!({
+                        "file": file,
+                        "mode": "project",
+                        "target": "resolved_project_all_envs",
+                        "project": project,
+                        "envs": envs.len(),
+                        "secrets": secret_count,
+                    })
+                }
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&metadata)?
+            );
+        } else {
+            match &payload {
+                SealedScopePayload::Scope { project, env, .. } => {
+                    println!(
+                        "exported encrypted resolved scope {}/{} to {}",
+                        project,
+                        env,
+                        file.display()
+                    );
+                }
+                SealedScopePayload::Project { project, envs } => {
+                    println!(
+                        "exported encrypted resolved project {} (all {} envs) to {}",
+                        project,
+                        envs.len(),
+                        file.display()
+                    );
+                }
+            }
+        }
+
+        Ok(ExitCode::SUCCESS)
+    }
+
+    fn archive_import(
+        &self,
+        project_override: Option<String>,
+        env_override: Option<String>,
+        file: &Path,
+        replace: bool,
+        json: bool,
+    ) -> Result<ExitCode> {
+        let master_secret = read_master_secret()
+            .context("master secret is not configured; run `macrun master set`")?;
+        let sealed: SealedScopeFile = self.read_json_file(file)?;
+        let payload = open_scope(&master_secret, &sealed)?;
+        match payload {
+            SealedScopePayload::Scope {
+                project,
+                env,
+                secrets,
+            } => {
+                let target_scope = ResolvedScope {
+                    project: self.import_project_name(project_override.unwrap_or(project)),
+                    env: env_override.unwrap_or(env),
+                    config_path: None,
+                };
+
+                let mut index = self.load_index()?;
+                let mut scope_secrets = read_scope_secrets(&target_scope.project, &target_scope.env)?;
+                let mut imported = Vec::new();
+                let mut skipped = Vec::new();
+
+                for (name, value) in secrets {
+                    if !replace && index.contains(&target_scope.project, &target_scope.env, &name) {
+                        skipped.push(name);
+                        continue;
+                    }
+                    scope_secrets.insert(name.clone(), value);
+                    index.upsert(StoredSecretMeta::new(
+                        target_scope.project.clone(),
+                        target_scope.env.clone(),
+                        name.clone(),
+                        "archive".to_owned(),
+                        Some(format!("imported from {}", file.display())),
+                    ));
+                    imported.push(name);
+                }
+
+                write_scope_secrets(&target_scope.project, &target_scope.env, &scope_secrets)?;
+                self.save_index(&index)?;
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "file": file,
+                            "mode": "scope",
+                            "project": self.display_project(&target_scope),
+                            "env": target_scope.env,
+                            "imported": imported,
+                            "skipped": skipped,
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "imported {} secret(s) from {} into {}/{}",
+                        imported.len(),
+                        file.display(),
+                        self.display_project(&target_scope),
+                        target_scope.env
+                    );
+                    if !skipped.is_empty() {
+                        println!("skipped {} key(s)", skipped.len());
+                    }
+                }
+            }
+            SealedScopePayload::Project { project, envs } => {
+                if env_override.is_some() {
+                    bail!("--env cannot be used when importing a whole-project archive");
+                }
+
+                let target_project = self.import_project_name(project_override.unwrap_or(project));
+                let mut bundle = read_project_bundle(&target_project)?;
+                let mut index = self.load_index()?;
+                let mut imported = Vec::new();
+                let mut skipped = Vec::new();
+
+                for (env_name, secrets) in envs {
+                    let target_env = bundle.envs.entry(env_name.clone()).or_default();
+                    for (name, value) in secrets {
+                        if !replace && index.contains(&target_project, &env_name, &name) {
+                            skipped.push(format!("{env_name}/{name}"));
+                            continue;
+                        }
+                        target_env.insert(name.clone(), value);
+                        index.upsert(StoredSecretMeta::new(
+                            target_project.clone(),
+                            env_name.clone(),
+                            name.clone(),
+                            "archive".to_owned(),
+                            Some(format!("imported from {}", file.display())),
+                        ));
+                        imported.push(format!("{env_name}/{name}"));
+                    }
+                }
+
+                write_project_bundle(&target_project, &bundle)?;
+                self.save_index(&index)?;
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "file": file,
+                            "mode": "project",
+                            "project": target_project,
+                            "imported": imported,
+                            "skipped": skipped,
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "imported {} secret(s) from {} into project {}",
+                        imported.len(),
+                        file.display(),
+                        target_project
+                    );
+                    if !skipped.is_empty() {
+                        println!("skipped {} key(s)", skipped.len());
+                    }
+                }
+            }
+        }
+
+        Ok(ExitCode::SUCCESS)
     }
 
     fn vault_encrypt(
@@ -809,6 +1100,35 @@ impl App {
         } else {
             &scope.project
         }
+    }
+
+    fn export_project_name<'a>(&self, scope: &'a ResolvedScope) -> &'a str {
+        self.display_project(scope)
+    }
+
+    fn import_project_name(&self, project: String) -> String {
+        if project == DEFAULT_PROJECT_LABEL {
+            DEFAULT_PROJECT_KEY.to_owned()
+        } else {
+            project
+        }
+    }
+
+    fn write_json_file<T: serde::Serialize>(&self, file: &Path, value: &T) -> Result<()> {
+        let temp_path = file.with_extension("tmp");
+        let contents = serde_json::to_string_pretty(value).context("failed to encode JSON file")?;
+        fs::write(&temp_path, contents)
+            .with_context(|| format!("failed to write {}", temp_path.display()))?;
+        fs::rename(&temp_path, file)
+            .with_context(|| format!("failed to move {} into place", file.display()))?;
+        Ok(())
+    }
+
+    fn read_json_file<T: serde::de::DeserializeOwned>(&self, file: &Path) -> Result<T> {
+        let contents = fs::read_to_string(file)
+            .with_context(|| format!("failed to read {}", file.display()))?;
+        serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse {}", file.display()))
     }
 
     fn load_index(&self) -> Result<IndexFile> {

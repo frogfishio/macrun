@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod index;
 mod keychain;
+mod sealed;
 mod util;
 mod vault;
 

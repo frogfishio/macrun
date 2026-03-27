@@ -7,7 +7,7 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
 const TOP_LEVEL_LONG_ABOUT: &str = "macrun stores local development secrets in macOS Keychain and injects them into child processes only when you ask it to.\n\nIt is designed to replace ad hoc .env files and broad shell exports with project-aware, env-aware secret injection.";
 
-const TOP_LEVEL_AFTER_HELP: &str = "Examples:\n  macrun set URL=https://somewhere\n  macrun init --project my-app --env dev\n  macrun exec -- cargo run\n  macrun env --format json\n\nUse `macrun exec --help` and `macrun vault --help` for bootstrap-transfer examples.";
+const TOP_LEVEL_AFTER_HELP: &str = "Examples:\n  macrun set URL=https://somewhere\n  macrun init --project my-app --env dev\n  macrun exec -- cargo run\n  macrun env --format json\n\nUse `macrun exec --help`, `macrun vault --help`, and `macrun archive --help` for advanced workflows.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -162,6 +162,16 @@ pub enum Commands {
         #[command(subcommand)]
         command: VaultCommands,
     },
+    #[command(about = "Manage the global master secret used for encrypted archive files")]
+    Master {
+        #[command(subcommand)]
+        command: MasterCommands,
+    },
+    #[command(about = "Export and import encrypted .env.macrun files")]
+    Archive {
+        #[command(subcommand)]
+        command: ArchiveCommands,
+    },
     #[command(about = "Inspect resolved scope and local macrun state")]
     Doctor,
 }
@@ -210,6 +220,56 @@ pub enum VaultCommands {
         #[arg(long, value_enum, default_value = "v2", help = "Vault KV engine version")]
         kv_version: KvVersionArg,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MasterCommands {
+    #[command(
+        about = "Set the global master secret without printing it back",
+        after_help = "Examples:\n  macrun master set\n  printf '%s' 'correct horse battery staple' | macrun master set --stdin"
+    )]
+    Set {
+        #[arg(long, help = "Read the master secret from stdin instead of prompting")]
+        stdin: bool,
+    },
+    #[command(about = "Clear the global master secret from Keychain")]
+    Clear,
+    #[command(about = "Show whether the global master secret is configured")]
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ArchiveCommands {
+    #[command(
+        about = "Export an encrypted .env.macrun file",
+        after_help = "Resolution rules match every other command: --project/--env first, then local config, then (default)/dev.\n\nExamples:\n  macrun archive export --mode scope --file .env.macrun\n  macrun --project my-app archive export --mode project --file my-app.macrun"
+    )]
+    Export {
+        #[arg(short = 'f', long, default_value = ".env.macrun", value_name = "FILE", help = "Path to the encrypted archive file")]
+        file: PathBuf,
+
+        #[arg(long, value_enum, default_value = "scope", help = "What to export: the resolved project/env scope, or the resolved project's whole bundle")]
+        mode: ArchiveExportMode,
+    },
+    #[command(
+        about = "Import an encrypted .env.macrun file back into Keychain",
+        after_help = "Examples:\n  macrun archive import --file .env.macrun\n  macrun archive import --file .env.macrun --replace"
+    )]
+    Import {
+        #[arg(short = 'f', long, default_value = ".env.macrun", value_name = "FILE", help = "Path to the encrypted archive file")]
+        file: PathBuf,
+
+        #[arg(long, help = "Replace existing stored values when keys already exist")]
+        replace: bool,
+    },
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum ArchiveExportMode {
+    #[value(help = "Export the resolved project/env scope")]
+    Scope,
+    #[value(help = "Export the resolved project, including all envs in that project")]
+    Project,
 }
 
 #[derive(Clone, Debug, ValueEnum)]

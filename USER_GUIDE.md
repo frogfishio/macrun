@@ -67,6 +67,8 @@ Current commands:
 - `env`
 - `unset`
 - `purge`
+- `master`
+- `archive`
 - `vault encrypt`
 - `vault push`
 - `doctor`
@@ -210,7 +212,76 @@ Suggested migration pattern:
 3. switch local commands to `macrun exec`
 4. remove or stop relying on the plaintext file
 
-## 10. List What Is Stored
+## 10. Global Master Secret and Encrypted `.env.macrun` Files
+
+macrun can seal a scope into an encrypted `.env.macrun` file using a global master secret stored separately in Keychain.
+
+This is meant for cases where you want an encrypted checked-in backup or a portable sealed secret bundle without exposing plaintext.
+
+The master secret is intentionally not printable through the CLI.
+
+You can:
+
+- set it
+- clear it
+- check whether it exists
+
+You cannot ask macrun to print it back.
+
+Set the master secret interactively:
+
+```bash
+macrun master set
+```
+
+Set it from stdin for automation:
+
+```bash
+printf '%s' 'correct horse battery staple' | macrun master set --stdin
+```
+
+Check whether it exists:
+
+```bash
+macrun master status
+```
+
+Clear it:
+
+```bash
+macrun master clear
+```
+
+Export the active scope into an encrypted file:
+
+```bash
+macrun archive export --mode scope --file .env.macrun
+```
+
+Export the whole project bundle:
+
+```bash
+macrun --project my-app archive export --mode project --file my-app.macrun
+```
+
+Import it later:
+
+```bash
+macrun archive import --file .env.macrun
+```
+
+Import with replacement of existing values:
+
+```bash
+macrun archive import --file .env.macrun --replace
+```
+
+By default, archive import restores whatever is embedded in the encrypted file.
+
+- scope archives restore one project/env scope and can be overridden with `--project` and `--env`
+- project archives restore every env in that project and can be overridden with `--project` only
+
+## 11. List What Is Stored
 
 List keys only:
 
@@ -226,7 +297,7 @@ macrun list --show-metadata
 
 By default, `list` does not print secret values.
 
-## 11. Print a Machine-Readable Environment
+## 12. Print a Machine-Readable Environment
 
 Shell output:
 
@@ -244,7 +315,7 @@ This command is most useful for inspection, scripting, and debugging.
 
 The safer default for interactive work is still to use `exec` rather than exporting secrets into your parent shell.
 
-## 12. Run Commands With Injected Secrets
+## 13. Run Commands With Injected Secrets
 
 This is the main workflow.
 
@@ -295,7 +366,7 @@ This is intentional bootstrap behavior: the child process should not receive bot
 
 If the scope has no stored keys, `exec` fails rather than silently running with an empty secret set.
 
-## 13. Use Multiple Envs
+## 14. Use Multiple Envs
 
 Envs let you keep separate local contexts inside one project.
 
@@ -321,7 +392,7 @@ macrun --project my-app --env staging exec -- cargo run
 
 Envs are useful when the variable names stay the same but the actual endpoints or credentials change.
 
-## 14. Purge a Scope
+## 15. Purge a Scope
 
 Remove every indexed secret for the active project and env:
 
@@ -331,7 +402,7 @@ macrun purge --yes
 
 This is intentionally destructive. Without `--yes`, the command fails and asks for explicit confirmation by re-running it.
 
-## 15. Check Local State
+## 16. Check Local State
 
 Run:
 
@@ -350,7 +421,7 @@ macrun doctor
 
 If you are unsure why a command cannot resolve a project or env, start with `doctor`.
 
-## 16. Storage Details
+## 17. Storage Details
 
 The current implementation stores secret values in macOS Keychain as one bundled item per project:
 
@@ -361,7 +432,7 @@ Inside that bundle, secrets remain separated by env.
 
 macrun also stores non-secret metadata in its local application config directory. That metadata powers commands such as `list`, `unset`, `purge`, and scoped selection.
 
-## 17. macOS Keychain Access Prompts After Rebuilds
+## 18. macOS Keychain Access Prompts After Rebuilds
 
 If macOS keeps asking for Keychain access every time you rebuild `macrun`, the usual cause is that the binary is not being signed with a stable identity.
 
@@ -390,7 +461,7 @@ make dist
 
 The default signing mode is ad-hoc signing with the identifier `io.frogfish.macrun`. Override it with `CODESIGN_IDENTITY=...` and `SIGN_NAME=...` if your local policy needs a different identity.
 
-## 18. Security Model
+## 19. Security Model
 
 macrun helps reduce these common local-development failures:
 
@@ -409,7 +480,7 @@ It does not protect you from:
 
 The rule is simple: once a process receives a secret, that process is part of your trust boundary.
 
-## 19. Vault Bootstrap Transfer
+## 20. Vault Bootstrap Transfer
 
 macrun's Vault support is for bootstrap transfer: moving a high-value secret out of local Keychain and into its real system boundary without first dropping it into a plaintext file.
 
@@ -474,7 +545,7 @@ macrun vault push APP_CLIENT_SECRET API_TOKEN \
   --kv-version v2
 ```
 
-## 20. Vault Over an SSH Tunnel
+## 21. Vault Over an SSH Tunnel
 
 macrun does not create or manage SSH tunnels itself.
 
@@ -498,7 +569,7 @@ macrun vault encrypt APP_CLIENT_SECRET \
 
 If the remote Vault endpoint expects HTTPS with a certificate valid only for its original hostname, forwarding to `127.0.0.1` may cause hostname validation failures. That is a transport configuration issue rather than a macrun-specific behavior.
 
-## 21. Recommended Usage Patterns
+## 22. Recommended Usage Patterns
 
 Good patterns:
 
@@ -514,7 +585,7 @@ Patterns to avoid:
 - keeping large plaintext `.env` files around after import
 - sharing one env across unrelated environments
 
-## 22. Troubleshooting
+## 23. Troubleshooting
 
 `no project resolved`
 
@@ -537,6 +608,17 @@ Patterns to avoid:
 `VAULT_TOKEN is required`
 
 - export `VAULT_TOKEN` before using `macrun vault encrypt` or `macrun vault push`
+
+`archive export` or `archive import` says the master secret is not configured
+
+- run `macrun master set`
+- or pipe the secret in with `macrun master set --stdin`
+
+`archive import` restores secrets into the wrong scope
+
+- remember that the sealed file carries either one scope or a whole project bundle
+- for scope archives, override with `--project` and `--env` if needed
+- for project archives, override only with `--project`
 
 macOS asks for Keychain access after every rebuild
 

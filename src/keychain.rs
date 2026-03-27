@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 
+const GLOBAL_SERVICE: &str = "macrun/global";
+const MASTER_SECRET_ACCOUNT: &str = "__master_secret__";
 const PROJECT_BUNDLE_ACCOUNT: &str = "__project_bundle__";
 
 type ScopeSecrets = BTreeMap<String, String>;
@@ -24,6 +26,41 @@ fn legacy_keychain_entry(project: &str, env: &str, key: &str) -> Result<Entry> {
 fn project_bundle_entry(project: &str) -> Result<Entry> {
     let service = format!("macrun/{project}");
     Entry::new(&service, PROJECT_BUNDLE_ACCOUNT).context("failed to create Keychain entry")
+}
+
+fn master_secret_entry() -> Result<Entry> {
+    Entry::new(GLOBAL_SERVICE, MASTER_SECRET_ACCOUNT).context("failed to create Keychain entry")
+}
+
+pub fn write_master_secret(secret: &str) -> Result<()> {
+    let entry = master_secret_entry()?;
+    entry
+        .set_password(secret)
+        .context("failed to store master secret in Keychain")
+}
+
+pub fn read_master_secret() -> Result<String> {
+    let entry = master_secret_entry()?;
+    entry
+        .get_password()
+        .context("failed to read master secret from Keychain")
+}
+
+pub fn clear_master_secret() -> Result<()> {
+    let entry = master_secret_entry()?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(err) => Err(err).context("failed to delete master secret from Keychain"),
+    }
+}
+
+pub fn has_master_secret() -> Result<bool> {
+    let entry = master_secret_entry()?;
+    match entry.get_password() {
+        Ok(_) => Ok(true),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(err) => Err(err).context("failed to check master secret in Keychain"),
+    }
 }
 
 pub fn read_project_bundle(project: &str) -> Result<ProjectSecretBundle> {
