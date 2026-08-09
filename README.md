@@ -1,438 +1,216 @@
 # macrun
 
-macrun is a macOS command-line tool for local development secrets.
+macrun keeps secrets in macOS Keychain and gives them to commands when they run.
 
-It stores secret values in macOS Keychain, tracks non-secret metadata separately, and injects secrets into a child process only when you explicitly run a command.
+## Quick start
 
-If you want the convenience of environment variables without leaving plaintext `.env` files around your repo, this is the tool.
+Save a secret:
 
-It also works with sensible defaults, so common usage does not require setup first.
+```console
+$ macrun set myapp production API_TOKEN
+API_TOKEN:
+```
 
-## Why Use It
+Type the value at the prompt and press Return. Your typing is hidden. Only put the secret **name** in the command:
 
-Local secret handling tends to drift into one of a few bad patterns:
+```bash
+# Yes: macrun asks for the value safely
+macrun set myapp production API_TOKEN
 
-- large plaintext `.env` files copied between projects
-- long-lived `export` commands in a shell session
-- reusing the wrong project's credentials by accident
-- handing every secret to every process whether it needs them or not
+# No: API_TOKEN=aaa is treated as a name, not a value
+macrun set myapp production API_TOKEN=aaa
+```
 
-macrun is designed to tighten that up without trying to be a full secret platform.
+Run your app with the saved secrets:
 
-It helps by:
+```bash
+macrun run myapp production -- npm start
+```
 
-- storing secret values in Keychain instead of repo files
-- scoping secrets by project and env
-- importing from existing `.env` files when needed
-- keeping the main workflow centered on whole-scope `macrun exec -- ...`
-- exporting encrypted `.env.macrun` files for check-in or recovery when you need a durable sealed copy
-
-## What It Is Not
-
-macrun is for local development on macOS. It is not a replacement for:
-
-- Vault or another server-side secret manager
-- CI/CD secret distribution
-- production secret storage
-- process sandboxing
-
-If a process receives a secret, that process can still leak it. macrun reduces exposure before process start; it does not make an unsafe program safe.
+The command receives `API_TOKEN` in its environment. macrun prints nothing of its own.
 
 ## Install
-
-From crates.io:
 
 ```bash
 cargo install macrun
 ```
 
-From this repository:
+Upgrade an older installation:
+
+```bash
+cargo install macrun --locked --force
+macrun --version
+```
+
+Or install this checkout:
 
 ```bash
 cargo install --path .
 ```
 
-During development you can also run it directly:
+## The one pattern
+
+A secret can belong to the machine, a project, or a project environment:
+
+| Command shape | Where the secret belongs |
+| --- | --- |
+| `macrun set SECRET` | this machine |
+| `macrun set PROJECT SECRET` | that project |
+| `macrun set PROJECT ENVIRONMENT SECRET` | that project environment |
+
+For example:
 
 ```bash
-cargo run -- doctor
+macrun set API_TOKEN                       # this machine
+macrun set myapp API_TOKEN                 # myapp
+macrun set myapp staging API_TOKEN         # myapp / staging
+macrun set myapp production DATABASE_URL   # myapp / production
 ```
 
-If you use macrun heavily during local development on macOS, consider signing the debug binary with a stable local code identity. Rebuilt binaries can trigger repeated Keychain access prompts because macOS may treat each rebuilt binary as a new caller.
+Use the same words with `list`, `run`, and `unset`.
 
-The default Makefile workflow uses ad-hoc signing with a stable identifier, which works for local development on this machine:
+## List secret names
+
+`list` shows secret names for one exact scope. It never prints their values:
 
 ```bash
-make build-signed
+macrun list                 # names stored for this machine
+macrun list myapp           # names stored for myapp
+macrun list myapp staging   # names stored for myapp / staging
 ```
 
-If you prefer, you can still override the signing identity explicitly.
-
-To install the exact lockfile-resolved dependency set from a published release:
+Suppose you saved these:
 
 ```bash
-cargo install --locked macrun
+macrun set myapp staging API_TOKEN
+macrun set myapp staging DATABASE_URL
+macrun set myapp production API_TOKEN
 ```
 
-## Quick Start
+Then:
 
-Store a value in the default project and default env:
+```console
+$ macrun list myapp staging
+API_TOKEN
+DATABASE_URL
+
+$ macrun list myapp production
+API_TOKEN
+```
+
+`macrun list myapp` does not combine every environment. It only lists secrets stored directly for `myapp`. If a scope is empty, `list` prints nothing.
+
+## Run a command
+
+Choose the same scope, then put the command after `--`:
 
 ```bash
-macrun set URL=https://somewhere
+macrun run -- some-command
+macrun run myapp -- some-command
+macrun run myapp staging -- some-command
 ```
 
-Store a value in a named env while keeping the default project:
+Only secrets from that exact scope are added to the command.
+
+## Unset a secret
+
+Use `unset` exactly like the shell counterpart to `set`:
 
 ```bash
-macrun set --env staging URL=https://staging.example.com
+macrun unset API_TOKEN
+macrun unset myapp API_TOKEN
+macrun unset myapp staging API_TOKEN
 ```
 
-Initialize the current working tree:
+Unsetting a secret that is already absent is harmless. Successful `set` and `unset` commands are quiet.
+
+## Automation
+
+Read a value from standard input:
 
 ```bash
-macrun init --project my-app --env dev
+printf '%s' "$API_TOKEN" | macrun set myapp staging API_TOKEN --stdin
 ```
 
-Import an existing `.env` file:
+Or read it from an environment variable:
 
 ```bash
-macrun import -f .env
+macrun set myapp staging API_TOKEN --from-env API_TOKEN
 ```
 
-List stored keys without printing values:
+Prefer these forms in setup scripts, Terraform, and Ansible so the value is not placed in the command itself.
 
-```bash
-macrun list
+### Capture a bootstrap key from Ansible
+
+Ansible can initialize software on a server, keep the returned key in memory, and send it directly to macrun on the developer Mac:
+
+```text
+server stdout → Ansible memory → macrun stdin → macOS Keychain
 ```
 
-Run a command with only the secrets it needs:
+No plaintext file is needed:
 
-```bash
-macrun exec -- cargo run
+```yaml
+- name: Bootstrap the application key
+  no_log: true
+  block:
+    - name: Obtain the pending bootstrap key
+      ansible.builtin.command:
+        argv:
+          - /opt/myapp/bin/myapp
+          - init
+          - --print-bootstrap-key
+      register: myapp_bootstrap
+
+    - name: Refuse an empty key
+      ansible.builtin.assert:
+        that:
+          - myapp_bootstrap.stdout | length > 0
+        quiet: true
+
+    - name: Store the key on the developer Mac
+      ansible.builtin.command:
+        argv:
+          - macrun
+          - set
+          - myapp
+          - production
+          - MASTER_KEY
+          - --stdin
+        stdin: "{{ myapp_bootstrap.stdout }}"
+        stdin_add_newline: false
+      delegate_to: localhost
+      throttle: 1
+
+    - name: Acknowledge safe receipt
+      ansible.builtin.command:
+        argv:
+          - /opt/myapp/bin/myapp
+          - acknowledge-bootstrap-key
 ```
 
-Run a command with one secret replaced by Vault Transit ciphertext:
+This assumes Ansible is being run from the developer Mac. `delegate_to: localhost` means the Ansible controller; in AWX or CI it refers to that runner, not a developer's computer.
 
-```bash
-macrun exec \
-  --vault-encrypt APP_CLIENT_SECRET=APP_CLIENT_SECRET_CIPHERTEXT \
-  --vault-addr http://127.0.0.1:8200 \
-  --vault-key app-secrets \
-  -- myapp
-```
+The application should keep returning the same pending key until `acknowledge-bootstrap-key` succeeds. That makes retries safe if Keychain is locked or the local storage task fails. `macrun set` overwrites the same entry, so repeating the transfer is harmless.
 
-Print the full resolved environment for the active project/env:
+For this handoff to remain safe:
 
-```bash
-macrun env --format json
-```
+- apply `no_log: true` to every task that can see the key
+- do not run the playbook with `ANSIBLE_DEBUG` enabled
+- have the application print only the key to stdout and diagnostics to stderr
+- ensure the developer's login Keychain is unlocked
 
-## Mental Model
+Ansible stores registered task results in memory for the current playbook run. Its command module supports stdin, and delegation runs the macrun step on the controller. See the Ansible documentation for [registered variables](https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_variables.html), [command stdin](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/command_module.html), [delegation](https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_delegation.html), and [`no_log`](https://docs.ansible.com/projects/ansible/latest/reference_appendices/faq.html).
 
-Each stored secret is identified by:
+## What macrun does
 
-- project
-- env
-- environment variable name
+- Stores values in macOS Keychain.
+- Keeps projects and environments separate.
+- Adds the selected secrets to one child command.
+- Prints nothing when `set` and `unset` succeed.
 
-Example scope:
-
-- project: `my-app`
-- env: `dev`
-- key: `APP_DATABASE_URL`
-
-When you run a command, macrun resolves the active project and env, reads every stored value for that scope from Keychain, and injects them into the child process you launched.
-
-## Core Commands
-
-Implemented today:
-
-- `init`
-- `set`
-- `get`
-- `import`
-- `list`
-- `exec`
-- `env`
-- `unset`
-- `purge --yes`
-- `doctor`
-- `master`
-- `archive`
-- `vault encrypt`
-- `vault push`
-
-Global flags:
-
-- `--project NAME`
-- `--env NAME`
-- `--json`
-
-## Common Workflows
-
-Set secrets manually:
-
-```bash
-macrun set APP_DATABASE_URL=postgres://localhost/appdb
-macrun set APP_SESSION_SECRET=change-me API_TOKEN=replace-me
-```
-
-Read a specific value:
-
-```bash
-macrun get APP_DATABASE_URL
-```
-
-Import a dotenv file into the active scope:
-
-```bash
-macrun import -f .env
-```
-
-Inspect metadata:
-
-```bash
-macrun list --show-metadata
-```
-
-Print a machine-readable environment snapshot:
-
-```bash
-macrun env --format json
-```
-
-Remove keys:
-
-```bash
-macrun unset APP_SESSION_SECRET API_TOKEN
-```
-
-Export the current scope into an encrypted `.env.macrun` file:
-
-```bash
-macrun master set
-macrun archive export --mode scope --file .env.macrun
-```
-
-## Project and Env Resolution
-
-macrun can resolve the active scope from a local config file named `.macrun.toml`.
-
-Project resolution order:
-
-1. explicit `--project`
-2. `.macrun.toml` in the current directory or nearest ancestor
-3. internal default project scope
-
-Env resolution order:
-
-1. explicit `--env`
-2. `default_env` from `.macrun.toml`
-3. `dev`
-
-That means a typical workflow is:
-
-1. run `macrun init` once in a working tree
-2. store or import secrets for that project
-3. run local commands via `macrun exec`
-
-If you do not initialize a working tree, `macrun` falls back to:
-
-1. project: `(default)`
-2. env: `dev`
-
-So commands like `macrun set URL=https://somewhere` work immediately.
-
-`(default)` is a display label for the fallback project scope, not a literal project name. If you run `macrun --project default ...`, the project name is exactly `default`.
-
-## Storage Model
-
-Secret values live in macOS Keychain.
-
-The current Keychain layout uses one bundled item per project:
-
-- service: `macrun/<project>`
-- account: `__project_bundle__`
-
-Inside that bundle, secrets remain grouped by env.
-
-Non-secret metadata is stored in the app config directory so macrun can efficiently list entries and track source and update time.
-
-## Encrypted `.env.macrun` Files
-
-macrun can seal a scope into an encrypted `.env.macrun` file using a global master secret stored separately in Keychain.
-
-This is useful when:
-
-- you want a durable encrypted backup of a scope
-- you want to check in a sealed secret file without storing plaintext
-- you want to move a scope to another machine and re-import it with the same master secret
-
-The master secret is write-only from the CLI: you can set it, clear it, or check whether it exists, but macrun does not print it back.
-
-Set the master secret:
-
-```bash
-macrun master set
-```
-
-Or from stdin for automation:
-
-```bash
-printf '%s' 'correct horse battery staple' | macrun master set --stdin
-```
-
-Export the active scope explicitly:
-
-```bash
-macrun archive export --mode scope --file .env.macrun
-```
-
-Export the whole project bundle, including every env stored under that project:
-
-```bash
-macrun --project my-app archive export --mode project --file my-app.macrun
-```
-
-Import it later:
-
-```bash
-macrun archive import --file .env.macrun
-```
-
-By default, import restores whatever is embedded in the sealed file.
-
-- scope archives restore one project/env scope and can be overridden with `--project` and `--env`
-- project archives restore every env in that project and can be overridden with `--project` only
-
-## macOS Keychain Prompts During Development
-
-If macOS asks for Keychain access repeatedly after every rebuild, that is usually a code-signing identity problem rather than a macrun bug.
-
-Cause:
-
-- Keychain trust is associated with the binary's code identity
-- an unsigned or ad-hoc rebuilt binary can look like a different app after each build
-- macOS then asks again because the caller no longer matches the previously approved identity
-
-Recommended fix:
-
-1. sign the debug binary after each build with a stable identity or stable ad-hoc identifier
-3. approve Keychain access once for that signed identity
-
-Helpful targets:
-
-- `make build-signed`
-- `make codesign-debug`
-- `make dist`
-
-The default signing mode is ad-hoc signing with the identifier `io.frogfish.macrun`. You can override it with `CODESIGN_IDENTITY=...` and `SIGN_NAME=...` if needed.
-
-## Vault Bootstrap Transfer
-
-macrun's Vault support exists for bootstrap transfer, not day-to-day runtime secret serving.
-
-The useful cases are:
-
-1. get Vault Transit ciphertext for an app that must store a key in its database
-2. write one or more secrets into Vault KV so the app fetches them from Vault directly
-
-### Transit ciphertext for app storage
-
-`vault encrypt` reads a plaintext secret from Keychain, sends it to Vault Transit, and prints the ciphertext.
-
-That ciphertext can then be stored in an application database or handed to an admin API. At runtime, the app asks Vault to decrypt it and keeps plaintext only in memory.
-
-If the app is being bootstrapped directly from `macrun exec`, you can also replace a plaintext env var with Transit ciphertext in the child process:
-
-```bash
-macrun exec \
-  --vault-encrypt APP_CLIENT_SECRET=APP_CLIENT_SECRET_CIPHERTEXT \
-  --vault-addr http://127.0.0.1:8200 \
-  --vault-key app-secrets \
-  -- myapp
-```
-
-In that mode, macrun removes `APP_CLIENT_SECRET` from the child environment and injects `APP_CLIENT_SECRET_CIPHERTEXT` instead.
-
-That removal is intentional. The bootstrap target process should receive ciphertext only, not both plaintext and ciphertext.
-
-Example:
-
-```bash
-export VAULT_TOKEN=...
-
-macrun vault encrypt APP_CLIENT_SECRET \
-  --vault-addr http://127.0.0.1:8200 \
-  --vault-key app-secrets \
-  --verify-decrypt
-```
-
-### Vault KV as the source of truth
-
-`vault push` reads one or more plaintext secrets from Keychain and writes them into Vault KV.
-
-Example:
-
-```bash
-export VAULT_TOKEN=...
-
-macrun vault push APP_CLIENT_SECRET API_TOKEN \
-  --vault-addr http://127.0.0.1:8200 \
-  --mount secret \
-  --path apps/my-app/dev \
-  --kv-version v2
-```
-
-## Security Notes
-
-macrun helps reduce:
-
-- accidental commits of plaintext secret files
-- broad shell-session contamination
-- wrong-project and wrong-env reuse
-- oversharing secrets to processes that do not need them
-
-It does not protect against:
-
-- malware or a compromised user session
-- root or admin compromise of the machine
-- a child process that logs or forwards its environment
-- terminal capture, clipboard leaks, or screen capture
-
-## Documentation
-
-- [USER_GUIDE.md](USER_GUIDE.md) for full usage and operational guidance
-- [TODO.md](TODO.md) for implementation notes and future work
-
-## Release Workflow
-
-Typical release flow:
-
-```bash
-make bump
-make dist
-cargo publish
-```
-
-What those steps do:
-
-- `make bump` increments [VERSION](VERSION)
-- `make dist` increments [BUILD](BUILD), builds a release binary, and stages release artifacts in `dist/`
-- `cargo publish` publishes the crate so users can install it with `cargo install macrun`
-
-The staged distribution currently includes:
-
-- `dist/bin/macrun`
-- `dist/USER_GUIDE.md`
-- `dist/README.md`
-- `dist/LICENSE`
-
-`BUILD` is intentionally included in the published crate source because the binary reads both [VERSION](VERSION) and [BUILD](BUILD) at compile time to produce the custom `--version` output.
+macrun is for local development on macOS. It is not a production secret manager and cannot prevent a program from leaking a secret after receiving it.
 
 ## License
 
-GPL-3.0-or-later
-
-Copyright (c) Alexander R. Croft
+GPL-3.0-or-later. See [LICENSE](LICENSE).

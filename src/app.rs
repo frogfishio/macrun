@@ -12,16 +12,21 @@ use anyhow::{anyhow, bail, Context, Result};
 use directories::ProjectDirs;
 use rpassword::prompt_password;
 
-use crate::cli::{ArchiveCommands, ArchiveExportMode, Cli, Commands, EnvFormat, KvVersionArg, MasterCommands, VaultCommands};
+use crate::cli::{
+    ArchiveCommands, ArchiveExportMode, Cli, Commands, EnvFormat, KvVersionArg, MasterCommands,
+    VaultCommands,
+};
 use crate::config::{find_local_config, LocalConfig, ResolvedScope, CONFIG_FILE_NAME};
 use crate::index::{IndexFile, StoredSecretMeta};
 use crate::keychain::{
-    clear_master_secret, delete_legacy_secret, delete_secret, has_master_secret, read_legacy_secret,
-    read_master_secret, read_project_bundle, read_scope_secrets, read_secret, store_secret,
-    write_master_secret, write_project_bundle, write_scope_secrets,
+    clear_master_secret, delete_legacy_secret, delete_secret, has_master_secret,
+    read_legacy_secret, read_master_secret, read_project_bundle, read_scope_secrets, read_secret,
+    store_secret, write_master_secret, write_project_bundle, write_scope_secrets,
 };
 use crate::sealed::{open_scope, seal_scope, SealedScopeFile, SealedScopePayload};
-use crate::util::{parse_env_file, parse_env_mapping, parse_pair, shell_quote, validate_env_name, EnvMapping};
+use crate::util::{
+    parse_env_file, parse_env_mapping, parse_pair, shell_quote, validate_env_name, EnvMapping,
+};
 use crate::vault::{parse_key_version, KvVersion, VaultClient};
 
 const DEFAULT_PROJECT_KEY: &str = "__default_project__";
@@ -39,9 +44,8 @@ impl App {
             .ok_or_else(|| anyhow!("could not resolve application directories"))?;
         let state_dir = dirs.config_dir().to_path_buf();
         let index_path = state_dir.join("index.json");
-        fs::create_dir_all(&state_dir).with_context(|| {
-            format!("failed to create state directory {}", state_dir.display())
-        })?;
+        fs::create_dir_all(&state_dir)
+            .with_context(|| format!("failed to create state directory {}", state_dir.display()))?;
         Ok(Self {
             state_dir,
             index_path,
@@ -55,9 +59,25 @@ impl App {
                 env,
                 force,
             }) => self.init(project.or(cli.project), env.or(cli.env), force, cli.json),
-            Some(Commands::Set { pairs, source, note }) => {
-                let scope = self.resolve_runtime_scope(cli.project, cli.env)?;
-                self.set_pairs(&scope, pairs, &source, note, cli.json)
+            Some(Commands::Set {
+                parts,
+                stdin,
+                from_env,
+                source,
+                note,
+            }) => {
+                if parts.iter().all(|part| part.contains('=')) {
+                    if stdin || from_env.is_some() {
+                        bail!("NAME=value cannot be combined with --stdin or --from-env");
+                    }
+                    let scope = self.resolve_runtime_scope(cli.project, cli.env)?;
+                    self.set_pairs(&scope, parts, &source, note, cli.json)
+                } else {
+                    let (scope_parts, name) = parts.split_at(parts.len() - 1);
+                    let scope = self.resolve_public_scope(scope_parts, cli.project, cli.env)?;
+                    let value = self.read_secret_input(&name[0], stdin, from_env.as_deref())?;
+                    self.set_one(&scope, &name[0], value)
+                }
             }
             Some(Commands::Get { name }) => {
                 let scope = self.resolve_runtime_scope(cli.project, cli.env)?;
@@ -71,9 +91,21 @@ impl App {
                 let scope = self.resolve_runtime_scope(cli.project, cli.env)?;
                 self.import_file(&scope, &file, replace, &source, cli.json)
             }
-            Some(Commands::List { show_metadata }) => {
-                let scope = self.resolve_runtime_scope(cli.project, cli.env)?;
-                self.list_entries(&scope, show_metadata, cli.json)
+            Some(Commands::List {
+                scope,
+                show_metadata,
+            }) => {
+                if show_metadata || cli.project.is_some() || cli.env.is_some() || cli.json {
+                    let scope = self.resolve_runtime_scope(cli.project, cli.env)?;
+                    self.list_entries(&scope, show_metadata, cli.json)
+                } else {
+                    let scope = self.resolve_simple_scope(&scope)?;
+                    self.list_simple(&scope)
+                }
+            }
+            Some(Commands::Run { scope, command }) => {
+                let scope = self.resolve_public_scope(&scope, cli.project, cli.env)?;
+                self.run_command(&scope, &command)
             }
             Some(Commands::Exec {
                 vault_encrypt,
@@ -96,9 +128,15 @@ impl App {
                 let scope = self.resolve_runtime_scope(cli.project, cli.env)?;
                 self.print_env(&scope, &format)
             }
-            Some(Commands::Unset { names }) => {
-                let scope = self.resolve_runtime_scope(cli.project, cli.env)?;
-                self.unset_names(&scope, &names, cli.json)
+            Some(Commands::Remove { parts }) => {
+                let (scope_parts, name) = parts.split_at(parts.len() - 1);
+                let scope = self.resolve_public_scope(scope_parts, cli.project, cli.env)?;
+                self.remove_simple(&scope, &name[0])
+            }
+            Some(Commands::Unset { parts }) => {
+                let (scope_parts, name) = parts.split_at(parts.len() - 1);
+                let scope = self.resolve_public_scope(scope_parts, cli.project, cli.env)?;
+                self.remove_simple(&scope, &name[0])
             }
             Some(Commands::Purge { yes }) => {
                 let scope = self.resolve_runtime_scope(cli.project, cli.env)?;
@@ -166,7 +204,8 @@ impl App {
                 .context("failed to read master secret from stdin")?;
             buffer.trim_end_matches(['\n', '\r']).to_owned()
         } else {
-            let first = prompt_password("master secret: ").context("failed to read master secret")?;
+            let first =
+                prompt_password("master secret: ").context("failed to read master secret")?;
             let second = prompt_password("confirm master secret: ")
                 .context("failed to read master secret confirmation")?;
             if first != second {
@@ -181,7 +220,10 @@ impl App {
 
         write_master_secret(&secret)?;
         if json {
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "configured": true }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({ "configured": true }))?
+            );
         } else {
             println!("master secret stored");
         }
@@ -191,7 +233,10 @@ impl App {
     fn master_clear(&self, json: bool) -> Result<ExitCode> {
         clear_master_secret()?;
         if json {
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "configured": false }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({ "configured": false }))?
+            );
         } else {
             println!("master secret cleared");
         }
@@ -201,9 +246,15 @@ impl App {
     fn master_status(&self, json: bool) -> Result<ExitCode> {
         let configured = has_master_secret()?;
         if json {
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "configured": configured }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({ "configured": configured }))?
+            );
         } else {
-            println!("master secret: {}", if configured { "configured" } else { "missing" });
+            println!(
+                "master secret: {}",
+                if configured { "configured" } else { "missing" }
+            );
         }
         Ok(ExitCode::SUCCESS)
     }
@@ -269,10 +320,7 @@ impl App {
                     })
                 }
             };
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&metadata)?
-            );
+            println!("{}", serde_json::to_string_pretty(&metadata)?);
         } else {
             match &payload {
                 SealedScopePayload::Scope { project, env, .. } => {
@@ -322,7 +370,8 @@ impl App {
                 };
 
                 let mut index = self.load_index()?;
-                let mut scope_secrets = read_scope_secrets(&target_scope.project, &target_scope.env)?;
+                let mut scope_secrets =
+                    read_scope_secrets(&target_scope.project, &target_scope.env)?;
                 let mut imported = Vec::new();
                 let mut skipped = Vec::new();
 
@@ -571,9 +620,8 @@ impl App {
             default_env: env.clone(),
         };
         let toml = toml::to_string_pretty(&config).context("failed to serialize local config")?;
-        fs::write(&config_path, toml).with_context(|| {
-            format!("failed to write local config {}", config_path.display())
-        })?;
+        fs::write(&config_path, toml)
+            .with_context(|| format!("failed to write local config {}", config_path.display()))?;
 
         if json {
             println!(
@@ -642,6 +690,46 @@ impl App {
             }
         }
 
+        Ok(ExitCode::SUCCESS)
+    }
+
+    fn read_secret_input(&self, name: &str, stdin: bool, from_env: Option<&str>) -> Result<String> {
+        validate_env_name(name)?;
+
+        let value = if stdin {
+            let mut value = String::new();
+            io::stdin()
+                .read_to_string(&mut value)
+                .context("failed to read the secret from standard input")?;
+            value.trim_end_matches(['\n', '\r']).to_owned()
+        } else if let Some(variable) = from_env {
+            env::var(variable)
+                .with_context(|| format!("environment variable {variable} is not set"))?
+        } else {
+            prompt_password(format!("{name}: ")).context("failed to read the secret")?
+        };
+
+        if value.is_empty() {
+            bail!("secret value cannot be empty");
+        }
+        Ok(value)
+    }
+
+    fn set_one(&self, scope: &ResolvedScope, name: &str, value: String) -> Result<ExitCode> {
+        validate_env_name(name)?;
+        let mut secrets = read_scope_secrets(&scope.project, &scope.env)?;
+        secrets.insert(name.to_owned(), value);
+        write_scope_secrets(&scope.project, &scope.env, &secrets)?;
+
+        let mut index = self.load_index()?;
+        index.upsert(StoredSecretMeta::new(
+            scope.project.clone(),
+            scope.env.clone(),
+            name.to_owned(),
+            "manual".to_owned(),
+            None,
+        ));
+        self.save_index(&index)?;
         Ok(ExitCode::SUCCESS)
     }
 
@@ -768,6 +856,13 @@ impl App {
         Ok(ExitCode::SUCCESS)
     }
 
+    fn list_simple(&self, scope: &ResolvedScope) -> Result<ExitCode> {
+        for name in read_scope_secrets(&scope.project, &scope.env)?.keys() {
+            println!("{name}");
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
     fn exec_command(
         &self,
         scope: &ResolvedScope,
@@ -787,15 +882,6 @@ impl App {
             vault_key,
         )?;
 
-        if env_map.is_empty() {
-            bail!("no secrets stored for the current project/env scope");
-        }
-
-        let program = command
-            .first()
-            .ok_or_else(|| anyhow!("exec requires a command after `--`"))?;
-        let args = &command[1..];
-
         eprintln!(
             "macrun: exec project={} env={} keys={} encrypted={}",
             self.display_project(scope),
@@ -804,9 +890,31 @@ impl App {
             encrypted_count
         );
 
+        self.spawn_command(command, &env_map)
+    }
+
+    fn run_command(&self, scope: &ResolvedScope, command: &[String]) -> Result<ExitCode> {
+        let env_map = self.selected_env(scope)?;
+        self.spawn_command(command, &env_map)
+    }
+
+    fn spawn_command(
+        &self,
+        command: &[String],
+        env_map: &BTreeMap<String, String>,
+    ) -> Result<ExitCode> {
+        if env_map.is_empty() {
+            bail!("no secrets found for that scope");
+        }
+
+        let program = command
+            .first()
+            .ok_or_else(|| anyhow!("a command is required after `--`"))?;
+        let args = &command[1..];
+
         let status = Command::new(program)
             .args(args)
-            .envs(&env_map)
+            .envs(env_map)
             .status()
             .with_context(|| format!("failed to execute `{program}`"))?;
 
@@ -817,11 +925,7 @@ impl App {
         }
     }
 
-    fn print_env(
-        &self,
-        scope: &ResolvedScope,
-        format: &EnvFormat,
-    ) -> Result<ExitCode> {
+    fn print_env(&self, scope: &ResolvedScope, format: &EnvFormat) -> Result<ExitCode> {
         let env_map = self.selected_env(scope)?;
         match format {
             EnvFormat::Shell => {
@@ -836,36 +940,16 @@ impl App {
         Ok(ExitCode::SUCCESS)
     }
 
-    fn unset_names(
-        &self,
-        scope: &ResolvedScope,
-        names: &[String],
-        json: bool,
-    ) -> Result<ExitCode> {
-        let mut index = self.load_index()?;
-        let mut scope_secrets = read_scope_secrets(&scope.project, &scope.env)?;
-        let mut removed = Vec::new();
-        for name in names {
-            scope_secrets.remove(name);
-            delete_legacy_secret(&scope.project, &scope.env, name)?;
-            index.remove(&scope.project, &scope.env, name);
-            removed.push(name.clone());
-        }
-        write_scope_secrets(&scope.project, &scope.env, &scope_secrets)?;
-        self.save_index(&index)?;
+    fn remove_simple(&self, scope: &ResolvedScope, name: &str) -> Result<ExitCode> {
+        validate_env_name(name)?;
+        let mut secrets = read_scope_secrets(&scope.project, &scope.env)?;
+        secrets.remove(name);
+        write_scope_secrets(&scope.project, &scope.env, &secrets)?;
+        delete_legacy_secret(&scope.project, &scope.env, name)?;
 
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "project": self.display_project(scope),
-                    "env": scope.env,
-                    "removed": removed,
-                }))?
-            );
-        } else {
-            println!("removed {} secret(s)", removed.len());
-        }
+        let mut index = self.load_index()?;
+        index.remove(&scope.project, &scope.env, name);
+        self.save_index(&index)?;
         Ok(ExitCode::SUCCESS)
     }
 
@@ -951,10 +1035,7 @@ impl App {
         Ok(ExitCode::SUCCESS)
     }
 
-    fn selected_env(
-        &self,
-        scope: &ResolvedScope,
-    ) -> Result<BTreeMap<String, String>> {
+    fn selected_env(&self, scope: &ResolvedScope) -> Result<BTreeMap<String, String>> {
         read_scope_secrets(&scope.project, &scope.env)
     }
 
@@ -971,12 +1052,10 @@ impl App {
             return Ok(0);
         }
 
-        let vault_addr = vault_addr.ok_or_else(|| {
-            anyhow!("--vault-addr is required when using --vault-encrypt")
-        })?;
-        let vault_key = vault_key.ok_or_else(|| {
-            anyhow!("--vault-key is required when using --vault-encrypt")
-        })?;
+        let vault_addr = vault_addr
+            .ok_or_else(|| anyhow!("--vault-addr is required when using --vault-encrypt"))?;
+        let vault_key = vault_key
+            .ok_or_else(|| anyhow!("--vault-key is required when using --vault-encrypt"))?;
         let vault = VaultClient::from_env(vault_addr)?;
         let mappings = vault_encrypt
             .iter()
@@ -991,6 +1070,29 @@ impl App {
         }
 
         Ok(mappings.len())
+    }
+
+    fn resolve_simple_scope(&self, parts: &[String]) -> Result<ResolvedScope> {
+        let scope = simple_scope(parts)?;
+        self.migrate_legacy_default_scope(&scope)?;
+        self.migrate_project_bundle(&scope.project)?;
+        Ok(scope)
+    }
+
+    fn resolve_public_scope(
+        &self,
+        parts: &[String],
+        legacy_project: Option<String>,
+        legacy_env: Option<String>,
+    ) -> Result<ResolvedScope> {
+        if legacy_project.is_some() || legacy_env.is_some() {
+            if !parts.is_empty() {
+                bail!("project and environment cannot be given both as words and as options");
+            }
+            self.resolve_runtime_scope(legacy_project, legacy_env)
+        } else {
+            self.resolve_simple_scope(parts)
+        }
     }
 
     fn resolve_scope(&self, project: Option<String>, env: Option<String>) -> Result<ResolvedScope> {
@@ -1150,5 +1252,60 @@ impl App {
         fs::rename(&temp_path, &self.index_path)
             .with_context(|| format!("failed to move {} into place", self.index_path.display()))?;
         Ok(())
+    }
+}
+
+fn simple_scope(parts: &[String]) -> Result<ResolvedScope> {
+    let (project, env) = match parts {
+        [] => (DEFAULT_PROJECT_KEY.to_owned(), DEFAULT_ENV.to_owned()),
+        [project] => (project.clone(), DEFAULT_ENV.to_owned()),
+        [project, env] => (project.clone(), env.clone()),
+        _ => bail!("scope must be empty, PROJECT, or PROJECT ENVIRONMENT"),
+    };
+
+    if project.is_empty() {
+        bail!("project cannot be empty");
+    }
+    if project == DEFAULT_PROJECT_KEY && !parts.is_empty() {
+        bail!("that project name is reserved");
+    }
+    if env.is_empty() {
+        bail!("environment cannot be empty");
+    }
+
+    Ok(ResolvedScope {
+        project,
+        env,
+        config_path: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{simple_scope, DEFAULT_ENV, DEFAULT_PROJECT_KEY};
+
+    fn parts(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn simple_scope_defaults_to_the_machine() {
+        let scope = simple_scope(&[]).unwrap();
+        assert_eq!(scope.project, DEFAULT_PROJECT_KEY);
+        assert_eq!(scope.env, DEFAULT_ENV);
+    }
+
+    #[test]
+    fn simple_scope_accepts_a_project_without_an_environment() {
+        let scope = simple_scope(&parts(&["shop"])).unwrap();
+        assert_eq!(scope.project, "shop");
+        assert_eq!(scope.env, DEFAULT_ENV);
+    }
+
+    #[test]
+    fn simple_scope_accepts_a_project_and_environment() {
+        let scope = simple_scope(&parts(&["shop", "staging"])).unwrap();
+        assert_eq!(scope.project, "shop");
+        assert_eq!(scope.env, "staging");
     }
 }

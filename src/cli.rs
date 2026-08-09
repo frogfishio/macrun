@@ -5,16 +5,17 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
-const TOP_LEVEL_LONG_ABOUT: &str = "macrun stores local development secrets in macOS Keychain and injects them into child processes only when you ask it to.\n\nIt is designed to replace ad hoc .env files and broad shell exports with project-aware, env-aware secret injection.";
+const TOP_LEVEL_LONG_ABOUT: &str =
+    "Keep secrets in macOS Keychain and give them to commands when they run.";
 
-const TOP_LEVEL_AFTER_HELP: &str = "Examples:\n  macrun set URL=https://somewhere\n  macrun init --project my-app --env dev\n  macrun exec -- cargo run\n  macrun env --format json\n\nUse `macrun exec --help`, `macrun vault --help`, and `macrun archive --help` for advanced workflows.";
+const TOP_LEVEL_AFTER_HELP: &str = "Examples:\n  macrun set API_TOKEN\n  macrun set myapp API_TOKEN\n  macrun set myapp staging API_TOKEN\n  macrun run myapp staging -- npm start";
 
 #[derive(Debug, Parser)]
 #[command(
     name = "macrun",
     disable_version_flag = true,
     disable_help_subcommand = true,
-    about = "Project-aware local secrets for macOS Keychain",
+    about = "Secrets for local commands",
     long_about = TOP_LEVEL_LONG_ABOUT,
     after_help = TOP_LEVEL_AFTER_HELP,
     next_line_help = true
@@ -23,17 +24,25 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
+        hide = true,
         value_name = "PROJECT",
         help = "Override the resolved project scope"
     )]
     pub project: Option<String>,
 
-    #[arg(long, global = true, value_name = "ENV", help = "Override the resolved env scope")]
+    #[arg(
+        long,
+        global = true,
+        hide = true,
+        value_name = "ENV",
+        help = "Override the resolved env scope"
+    )]
     pub env: Option<String>,
 
     #[arg(
         long,
         global = true,
+        hide = true,
         action = ArgAction::SetTrue,
         help = "Print JSON output when the command supports it"
     )]
@@ -62,9 +71,16 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    #[command(about = "Bind the current working tree to a named project and env")]
+    #[command(
+        hide = true,
+        about = "Bind the current working tree to a named project and env"
+    )]
     Init {
-        #[arg(long, value_name = "PROJECT", help = "Project name to bind to this tree")]
+        #[arg(
+            long,
+            value_name = "PROJECT",
+            help = "Project name to bind to this tree"
+        )]
         project: Option<String>,
 
         #[arg(long, value_name = "ENV", help = "Default env for this tree")]
@@ -73,39 +89,111 @@ pub enum Commands {
         #[arg(long, help = "Overwrite an existing .macrun.toml file")]
         force: bool,
     },
-    #[command(about = "Store one or more NAME=value pairs in Keychain")]
+    #[command(
+        about = "Save a secret in Keychain",
+        after_help = "Examples:\n  macrun set API_TOKEN\n  macrun set myapp API_TOKEN\n  macrun set myapp staging API_TOKEN\n\nThe value is prompted for securely. For automation, use --stdin or --from-env."
+    )]
     Set {
-        #[arg(required = true, value_name = "NAME=value", help = "Secret assignments to store")]
-        pairs: Vec<String>,
+        #[arg(
+            required = true,
+            num_args = 1..=3,
+            value_name = "SCOPE",
+            help = "SECRET, PROJECT SECRET, or PROJECT ENVIRONMENT SECRET"
+        )]
+        parts: Vec<String>,
 
-        #[arg(long, default_value = "manual", help = "Metadata source label for stored secrets")]
+        #[arg(
+            long,
+            conflicts_with = "from_env",
+            help = "Read the value from standard input"
+        )]
+        stdin: bool,
+
+        #[arg(
+            long,
+            value_name = "VARIABLE",
+            help = "Read the value from an environment variable"
+        )]
+        from_env: Option<String>,
+
+        #[arg(
+            long,
+            hide = true,
+            default_value = "manual",
+            help = "Metadata source label for stored secrets"
+        )]
         source: String,
 
-        #[arg(long, help = "Optional metadata note stored alongside the index entry")]
+        #[arg(
+            long,
+            hide = true,
+            help = "Optional metadata note stored alongside the index entry"
+        )]
         note: Option<String>,
     },
-    #[command(about = "Print a single stored secret value")]
+    #[command(hide = true, about = "Print a single stored secret value")]
     Get {
         #[arg(value_name = "NAME", help = "Secret name to read")]
         name: String,
     },
-    #[command(about = "Import secrets from a dotenv-style file")]
+    #[command(hide = true, about = "Import secrets from a dotenv-style file")]
     Import {
-        #[arg(short = 'f', long, value_name = "FILE", help = "Path to the source env file")]
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = "Path to the source env file"
+        )]
         file: PathBuf,
 
         #[arg(long, help = "Replace existing stored values when keys already exist")]
         replace: bool,
 
-        #[arg(long, default_value = "import", help = "Metadata source label for imported secrets")]
+        #[arg(
+            long,
+            default_value = "import",
+            help = "Metadata source label for imported secrets"
+        )]
         source: String,
     },
-    #[command(about = "List stored secret names for the active scope")]
+    #[command(about = "List secret names")]
     List {
-        #[arg(long, help = "Show source, update time, and note metadata")]
+        #[arg(
+            num_args = 0..=2,
+            value_name = "SCOPE",
+            help = "Nothing, PROJECT, or PROJECT ENVIRONMENT"
+        )]
+        scope: Vec<String>,
+
+        #[arg(
+            long,
+            hide = true,
+            help = "Show source, update time, and note metadata"
+        )]
         show_metadata: bool,
     },
     #[command(
+        about = "Run a command with its secrets",
+        after_help = "Examples:\n  macrun run -- env\n  macrun run myapp -- npm start\n  macrun run myapp staging -- npm start"
+    )]
+    Run {
+        #[arg(
+            num_args = 0..=2,
+            value_name = "SCOPE",
+            help = "Nothing, PROJECT, or PROJECT ENVIRONMENT"
+        )]
+        scope: Vec<String>,
+
+        #[arg(
+            last = true,
+            required = true,
+            value_name = "COMMAND",
+            help = "Command to run after --"
+        )]
+        command: Vec<String>,
+    },
+    #[command(
+        hide = true,
         about = "Run a command with every secret from the active scope injected",
         after_help = "Examples:\n  macrun exec -- cargo run\n  macrun exec -- python3 server.py\n  macrun exec --vault-encrypt APP_CLIENT_SECRET=APP_SECRET_CIPHERTEXT --vault-addr http://127.0.0.1:8200 --vault-key app-secrets -- app"
     )]
@@ -139,40 +227,72 @@ pub enum Commands {
         )]
         vault_key: Option<String>,
 
-        #[arg(last = true, required = true, value_name = "COMMAND", help = "Command to execute after --")]
+        #[arg(
+            last = true,
+            required = true,
+            value_name = "COMMAND",
+            help = "Command to execute after --"
+        )]
         command: Vec<String>,
     },
-    #[command(about = "Print all secrets in the active scope as shell exports or JSON")]
+    #[command(
+        hide = true,
+        about = "Print all secrets in the active scope as shell exports or JSON"
+    )]
     Env {
         #[arg(long, value_enum, default_value = "shell", help = "Output format")]
         format: EnvFormat,
     },
-    #[command(about = "Remove one or more stored secrets from the active scope")]
-    Unset {
-        #[arg(required = true, value_name = "NAME", help = "Secret names to remove")]
-        names: Vec<String>,
+    #[command(hide = true, about = "Remove a secret")]
+    Remove {
+        #[arg(
+            required = true,
+            num_args = 1..=3,
+            value_name = "SCOPE",
+            help = "SECRET, PROJECT SECRET, or PROJECT ENVIRONMENT SECRET"
+        )]
+        parts: Vec<String>,
     },
-    #[command(about = "Delete every stored secret in the active project/env scope")]
+    #[command(about = "Unset a secret")]
+    Unset {
+        #[arg(
+            required = true,
+            num_args = 1..=3,
+            value_name = "SCOPE",
+            help = "SECRET, PROJECT SECRET, or PROJECT ENVIRONMENT SECRET"
+        )]
+        parts: Vec<String>,
+    },
+    #[command(
+        hide = true,
+        about = "Delete every stored secret in the active project/env scope"
+    )]
     Purge {
         #[arg(long, help = "Required confirmation for destructive purge")]
         yes: bool,
     },
-    #[command(about = "Transfer stored secrets into Vault for bootstrap workflows")]
+    #[command(
+        hide = true,
+        about = "Transfer stored secrets into Vault for bootstrap workflows"
+    )]
     Vault {
         #[command(subcommand)]
         command: VaultCommands,
     },
-    #[command(about = "Manage the global master secret used for encrypted archive files")]
+    #[command(
+        hide = true,
+        about = "Manage the global master secret used for encrypted archive files"
+    )]
     Master {
         #[command(subcommand)]
         command: MasterCommands,
     },
-    #[command(about = "Export and import encrypted .env.macrun files")]
+    #[command(hide = true, about = "Export and import encrypted .env.macrun files")]
     Archive {
         #[command(subcommand)]
         command: ArchiveCommands,
     },
-    #[command(about = "Inspect resolved scope and local macrun state")]
+    #[command(hide = true, about = "Inspect resolved scope and local macrun state")]
     Doctor,
 }
 
@@ -187,10 +307,19 @@ pub enum VaultCommands {
         #[arg(value_name = "ENV_KEY", help = "Stored secret name to encrypt")]
         env_key: String,
 
-        #[arg(long, value_name = "URL", help = "Vault base URL, for example http://127.0.0.1:8200")]
+        #[arg(
+            long,
+            value_name = "URL",
+            help = "Vault base URL, for example http://127.0.0.1:8200"
+        )]
         vault_addr: String,
 
-        #[arg(long, default_value = "transit", value_name = "PATH", help = "Transit mount path inside Vault")]
+        #[arg(
+            long,
+            default_value = "transit",
+            value_name = "PATH",
+            help = "Transit mount path inside Vault"
+        )]
         transit_path: String,
 
         #[arg(long, value_name = "KEY", help = "Vault transit key name")]
@@ -205,19 +334,41 @@ pub enum VaultCommands {
         after_help = "Examples:\n  macrun vault push APP_CLIENT_SECRET --vault-addr http://127.0.0.1:8200 --path apps/my-app/dev\n  macrun vault push APP_CLIENT_SECRET API_TOKEN --vault-addr http://127.0.0.1:8200 --mount secret --path apps/my-app/dev --kv-version v2"
     )]
     Push {
-        #[arg(required = true, value_name = "ENV_KEY", help = "Stored secret names to write into Vault")]
+        #[arg(
+            required = true,
+            value_name = "ENV_KEY",
+            help = "Stored secret names to write into Vault"
+        )]
         env_keys: Vec<String>,
 
-        #[arg(long, value_name = "URL", help = "Vault base URL, for example http://127.0.0.1:8200")]
+        #[arg(
+            long,
+            value_name = "URL",
+            help = "Vault base URL, for example http://127.0.0.1:8200"
+        )]
         vault_addr: String,
 
-        #[arg(long, default_value = "secret", value_name = "MOUNT", help = "Vault KV mount name")]
+        #[arg(
+            long,
+            default_value = "secret",
+            value_name = "MOUNT",
+            help = "Vault KV mount name"
+        )]
         mount: String,
 
-        #[arg(long, value_name = "PATH", help = "Logical Vault KV path below the mount")]
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Logical Vault KV path below the mount"
+        )]
         path: String,
 
-        #[arg(long, value_enum, default_value = "v2", help = "Vault KV engine version")]
+        #[arg(
+            long,
+            value_enum,
+            default_value = "v2",
+            help = "Vault KV engine version"
+        )]
         kv_version: KvVersionArg,
     },
 }
@@ -245,10 +396,21 @@ pub enum ArchiveCommands {
         after_help = "Resolution rules match every other command: --project/--env first, then local config, then (default)/dev.\n\nExamples:\n  macrun archive export --mode scope --file .env.macrun\n  macrun --project my-app archive export --mode project --file my-app.macrun"
     )]
     Export {
-        #[arg(short = 'f', long, default_value = ".env.macrun", value_name = "FILE", help = "Path to the encrypted archive file")]
+        #[arg(
+            short = 'f',
+            long,
+            default_value = ".env.macrun",
+            value_name = "FILE",
+            help = "Path to the encrypted archive file"
+        )]
         file: PathBuf,
 
-        #[arg(long, value_enum, default_value = "scope", help = "What to export: the resolved project/env scope, or the resolved project's whole bundle")]
+        #[arg(
+            long,
+            value_enum,
+            default_value = "scope",
+            help = "What to export: the resolved project/env scope, or the resolved project's whole bundle"
+        )]
         mode: ArchiveExportMode,
     },
     #[command(
@@ -256,7 +418,13 @@ pub enum ArchiveCommands {
         after_help = "Examples:\n  macrun archive import --file .env.macrun\n  macrun archive import --file .env.macrun --replace"
     )]
     Import {
-        #[arg(short = 'f', long, default_value = ".env.macrun", value_name = "FILE", help = "Path to the encrypted archive file")]
+        #[arg(
+            short = 'f',
+            long,
+            default_value = ".env.macrun",
+            value_name = "FILE",
+            help = "Path to the encrypted archive file"
+        )]
         file: PathBuf,
 
         #[arg(long, help = "Replace existing stored values when keys already exist")]
@@ -282,4 +450,59 @@ pub enum EnvFormat {
 pub enum KvVersionArg {
     V1,
     V2,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn set_accepts_project_environment_and_secret() {
+        let cli = Cli::try_parse_from(["macrun", "set", "shop", "staging", "API_TOKEN", "--stdin"])
+            .unwrap();
+        match cli.command.unwrap() {
+            Commands::Set { parts, stdin, .. } => {
+                assert_eq!(parts, ["shop", "staging", "API_TOKEN"]);
+                assert!(stdin);
+            }
+            _ => panic!("expected set"),
+        }
+    }
+
+    #[test]
+    fn run_keeps_scope_separate_from_the_command() {
+        let cli = Cli::try_parse_from(["macrun", "run", "shop", "staging", "--", "npm", "start"])
+            .unwrap();
+        match cli.command.unwrap() {
+            Commands::Run { scope, command } => {
+                assert_eq!(scope, ["shop", "staging"]);
+                assert_eq!(command, ["npm", "start"]);
+            }
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn unset_uses_the_same_scope_shape_as_set() {
+        let cli = Cli::try_parse_from(["macrun", "unset", "shop", "staging", "API_TOKEN"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Unset { parts } => {
+                assert_eq!(parts, ["shop", "staging", "API_TOKEN"]);
+            }
+            _ => panic!("expected unset"),
+        }
+    }
+
+    #[test]
+    fn normal_help_only_shows_the_four_everyday_commands() {
+        let help = Cli::command().render_long_help().to_string();
+        for command in ["set", "list", "run", "unset"] {
+            assert!(help.contains(command));
+        }
+        for hidden in ["remove", "init", "exec", "vault", "archive", "doctor"] {
+            assert!(!help.contains(&format!("  {hidden}\n")));
+        }
+    }
 }
